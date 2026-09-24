@@ -7,16 +7,85 @@
 
 set -e
 
-# Configuration (can be overridden via environment variables)
+# Capture environment overrides before loading file config
+ENV_CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-}"
+ENV_AIAB_KATA="${AIAB_KATA:-}"
+ENV_AIAB_HYPERVISOR="${AIAB_HYPERVISOR:-}"
+ENV_KATA_RUNTIME="${KATA_RUNTIME:-}"
+ENV_KVM_DEVICE="${KVM_DEVICE:-}"
+ENV_DEFAULT_MODEL="${DEFAULT_MODEL:-}"
+ENV_DEFAULT_EFFORT="${DEFAULT_EFFORT:-}"
+
+# Configuration file location (XDG compliant, overridable via AIAB_CONFIG_FILE)
+AIAB_CONFIG_FILE="${AIAB_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/aiab/config}"
+AIAB_CONFIG_DIR="$(dirname "${AIAB_CONFIG_FILE}")"
+
+# Configuration defaults
 AGY_IMAGE="${AGY_IMAGE:-agy-yolo:latest}"
 BASKET_TAG="${BASKET_TAG:-agy-basket:latest}"
 AGY_DATA_VOLUME="${AGY_DATA_VOLUME:-agy-data}"
 AGY_CONFIG_VOLUME="${AGY_CONFIG_VOLUME:-agy-config}"
-CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-}"
+CONTAINER_RUNTIME=""
+AIAB_KATA=0
+AIAB_HYPERVISOR=""
+KATA_RUNTIME="kata-runtime"
+KVM_DEVICE="/dev/kvm"
+DEFAULT_MODEL=""
+DEFAULT_EFFORT=""
+
+load_config() {
+    if [ -f "${AIAB_CONFIG_FILE}" ]; then
+        while IFS='=' read -r key val || [ -n "$key" ]; do
+            # Trim whitespace
+            key="$(echo "$key" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            # Ignore empty lines and comments
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            val="$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^["'"'"']//' -e 's/["'"'"']$//')"
+            case "$key" in
+                AIAB_KATA)          AIAB_KATA="$val" ;;
+                CONTAINER_RUNTIME)  CONTAINER_RUNTIME="$val" ;;
+                KATA_RUNTIME)       KATA_RUNTIME="$val" ;;
+                DEFAULT_MODEL)      DEFAULT_MODEL="$val" ;;
+                DEFAULT_EFFORT)     DEFAULT_EFFORT="$val" ;;
+            esac
+        done < "${AIAB_CONFIG_FILE}"
+    fi
+
+    # Environment variables take precedence over config file
+    if [ -n "$ENV_CONTAINER_RUNTIME" ]; then CONTAINER_RUNTIME="$ENV_CONTAINER_RUNTIME"; fi
+    if [ -n "$ENV_AIAB_KATA" ]; then AIAB_KATA="$ENV_AIAB_KATA"; fi
+    if [ -n "$ENV_AIAB_HYPERVISOR" ]; then AIAB_HYPERVISOR="$ENV_AIAB_HYPERVISOR"; fi
+    if [ -n "$ENV_KATA_RUNTIME" ]; then KATA_RUNTIME="$ENV_KATA_RUNTIME"; fi
+    if [ -n "$ENV_KVM_DEVICE" ]; then KVM_DEVICE="$ENV_KVM_DEVICE"; fi
+    if [ -n "$ENV_DEFAULT_MODEL" ]; then DEFAULT_MODEL="$ENV_DEFAULT_MODEL"; fi
+    if [ -n "$ENV_DEFAULT_EFFORT" ]; then DEFAULT_EFFORT="$ENV_DEFAULT_EFFORT"; fi
+}
+
+save_config() {
+    mkdir -p "${AIAB_CONFIG_DIR}"
+    cat << EOF > "${AIAB_CONFIG_FILE}"
+# agyInABasket (aiab) Configuration File
+# Automatically managed by 'aiab config'. You can also edit this file manually.
+
+# Enable Kata Containers KVM microVM isolation by default (1 = enabled, 0 = disabled)
 AIAB_KATA="${AIAB_KATA:-0}"
-AIAB_HYPERVISOR="${AIAB_HYPERVISOR:-}"
+
+# Preferred container engine ('auto', 'podman', or 'docker')
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-auto}"
+
+# Kata Containers runtime name or binary path
 KATA_RUNTIME="${KATA_RUNTIME:-kata-runtime}"
-KVM_DEVICE="${KVM_DEVICE:-/dev/kvm}"
+
+# Default model forwarded to agy (empty for agy default)
+DEFAULT_MODEL="${DEFAULT_MODEL:-}"
+
+# Default reasoning effort forwarded to agy (empty, 'low', 'medium', 'high')
+DEFAULT_EFFORT="${DEFAULT_EFFORT:-}"
+EOF
+}
+
+# Load saved configuration
+load_config
 
 # Determine repository root directory if available (for rebuild/update)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,6 +109,7 @@ Commands:
   rebuild       Force clean rebuild of the container image without cache
   status        Display container image, volume sizes, and agy CLI version
   check-kata    Verify host KVM support and Kata Containers runtime status
+  config        Manage persistent defaults interactively or via CLI
   clean         Prune stopped containers and dangling images
   backup-auth   Backup persistent auth tokens and conversations to a tar archive
   reset-auth    Reset persistent authentication (clears stored tokens and databases)
@@ -49,6 +119,7 @@ Arguments:
   DIRECTORY     Path to project directory (default: current directory '.')
   OPTIONS       Flags forwarded to agy (e.g., --continue, --model, --effort)
   --kata / --hypervisor  Launch container enclosed in a Kata Containers KVM microVM
+  --no-kata     Run with standard container isolation (overrides config)
   bash / sh     Launch an interactive bash shell inside the container instead of agy
 
 Examples:
@@ -56,6 +127,9 @@ Examples:
   aiab --kata                       # Launch with hardware KVM microVM isolation
   aiab ~/projects/my-app --kata     # Launch project enclosed in Kata microVM
   aiab check-kata                   # Run hypervisor and KVM diagnostics
+  aiab config                       # Launch interactive configuration menu
+  aiab config show                  # View current persistent configuration
+  aiab config set AIAB_KATA 1       # Enable Kata microVM by default
   aiab update                       # Update container with the latest agy CLI release
   aiab status                       # Show container image and volume status
   aiab ~/projects/my-app            # Launch agy in specific project directory
@@ -63,18 +137,19 @@ Examples:
   aiab . bash                       # Open an interactive bash shell in the project container
 
 Configuration:
-  CONTAINER_RUNTIME Container engine to use: 'docker' or 'podman' (default: auto-detected)
+  CONTAINER_RUNTIME Container engine to use: 'docker', 'podman', or 'auto' (default: auto)
   AGY_IMAGE         Container image to run (default: agy-yolo:latest)
   AGY_DATA_VOLUME   Container volume for persistent auth & tokens (default: agy-data)
   AGY_CONFIG_VOLUME Container volume for persistent configs (default: agy-config)
   AIAB_KATA         Enable Kata Containers microVM hypervisor isolation by default (1/0)
   KATA_RUNTIME      Kata runtime name or binary path (default: kata-runtime)
+  AIAB_CONFIG_FILE  Custom configuration file path (default: ~/.config/aiab/config)
 EOF
 }
 
 # Auto-detect container runtime if not explicitly specified
 detect_runtime() {
-    if [ -n "$CONTAINER_RUNTIME" ]; then
+    if [ -n "$CONTAINER_RUNTIME" ] && [ "$CONTAINER_RUNTIME" != "auto" ]; then
         if ! command -v "$CONTAINER_RUNTIME" >/dev/null 2>&1; then
             echo "❌ Error: Configured CONTAINER_RUNTIME='$CONTAINER_RUNTIME' not found in PATH." >&2
             exit 1
@@ -305,6 +380,230 @@ cmd_check_kata() {
     fi
 }
 
+# Interactive Configuration Menu
+interactive_config_menu() {
+    while true; do
+        echo ""
+        echo "=========================================================="
+        echo "           agyInABasket (aiab) Settings Menu              "
+        echo "=========================================================="
+        echo "Config file: ${AIAB_CONFIG_FILE}"
+        echo ""
+        local kata_label="[Disabled]"
+        if [ "${AIAB_KATA:-0}" = "1" ]; then
+            kata_label="[Enabled (KVM MicroVM)]"
+        fi
+        local engine_label="${CONTAINER_RUNTIME:-auto}"
+        local model_label="${DEFAULT_MODEL:-<none>}"
+        local effort_label="${DEFAULT_EFFORT:-<none>}"
+
+        echo "  1) Hypervisor Isolation (Kata):  $kata_label"
+        echo "  2) Default Container Engine:     [$engine_label]"
+        echo "  3) Kata Runtime Identifier:      [${KATA_RUNTIME:-kata-runtime}]"
+        echo "  4) Default Model:                [$model_label]"
+        echo "  5) Default Effort:               [$effort_label]"
+        echo "  6) Run Diagnostics (check-kata)"
+        echo "  r) Reset all to defaults"
+        echo "  q) Quit / Exit"
+        echo "=========================================================="
+        read -rp "Select an option (1-6, r, q): " choice
+
+        case "$choice" in
+            1)
+                if [ "${AIAB_KATA:-0}" = "1" ]; then
+                    AIAB_KATA=0
+                    echo "✓ Hypervisor isolation disabled (standard container)."
+                else
+                    AIAB_KATA=1
+                    echo "✓ Hypervisor isolation enabled (Kata Containers microVM)."
+                fi
+                save_config
+                ;;
+            2)
+                echo ""
+                echo "Select preferred container engine:"
+                echo "  1) auto (prefer Podman if available, then Docker)"
+                echo "  2) podman"
+                echo "  3) docker"
+                read -rp "Choice (1-3): " eng_choice
+                case "$eng_choice" in
+                    1) CONTAINER_RUNTIME="auto" ;;
+                    2) CONTAINER_RUNTIME="podman" ;;
+                    3) CONTAINER_RUNTIME="docker" ;;
+                    *) echo "Invalid choice." ;;
+                esac
+                save_config
+                ;;
+            3)
+                read -rp "Enter Kata runtime identifier (default: kata-runtime): " kr
+                if [ -n "$kr" ]; then
+                    KATA_RUNTIME="$kr"
+                    save_config
+                fi
+                ;;
+            4)
+                read -rp "Enter default model (e.g. 'Gemini 2.5 Pro', or press enter to clear): " dm
+                DEFAULT_MODEL="$dm"
+                save_config
+                ;;
+            5)
+                echo "Select default reasoning effort:"
+                echo "  1) low"
+                echo "  2) medium"
+                echo "  3) high"
+                echo "  4) none (clear)"
+                read -rp "Choice (1-4): " eff_choice
+                case "$eff_choice" in
+                    1) DEFAULT_EFFORT="low" ;;
+                    2) DEFAULT_EFFORT="medium" ;;
+                    3) DEFAULT_EFFORT="high" ;;
+                    4) DEFAULT_EFFORT="" ;;
+                    *) echo "Invalid choice." ;;
+                esac
+                save_config
+                ;;
+            6)
+                echo ""
+                cmd_check_kata || true
+                ;;
+            r|R)
+                read -rp "Are you sure you want to reset all settings to defaults? (y/N) " confirm_reset
+                if [[ "$confirm_reset" =~ ^[Yy]$ ]]; then
+                    AIAB_KATA=0
+                    CONTAINER_RUNTIME="auto"
+                    KATA_RUNTIME="kata-runtime"
+                    DEFAULT_MODEL=""
+                    DEFAULT_EFFORT=""
+                    save_config
+                    echo "✓ Configuration reset to defaults."
+                fi
+                ;;
+            q|Q)
+                echo "Exiting configuration menu."
+                break
+                ;;
+            *)
+                echo "Invalid selection."
+                ;;
+        esac
+    done
+}
+
+# Subcommand: config
+cmd_config() {
+    local action="${1:-}"
+    shift 2>/dev/null || true
+
+    case "$action" in
+        show|list)
+            echo "=== agyInABasket Configuration ==="
+            echo "Config file: ${AIAB_CONFIG_FILE}"
+            echo ""
+            local kata_desc="[Disabled]"
+            if [ "${AIAB_KATA:-0}" = "1" ]; then
+                kata_desc="[Enabled (KVM MicroVM)]"
+            fi
+            echo "  AIAB_KATA:         ${AIAB_KATA:-0} ${kata_desc}"
+            echo "  CONTAINER_RUNTIME: ${CONTAINER_RUNTIME:-auto}"
+            echo "  KATA_RUNTIME:      ${KATA_RUNTIME:-kata-runtime}"
+            echo "  DEFAULT_MODEL:     ${DEFAULT_MODEL:-<none>}"
+            echo "  DEFAULT_EFFORT:    ${DEFAULT_EFFORT:-<none>}"
+            echo ""
+            return 0
+            ;;
+        get)
+            local key="${1:-}"
+            if [ -z "$key" ]; then
+                echo "Usage: aiab config get <KEY>" >&2
+                return 1
+            fi
+            case "$key" in
+                AIAB_KATA)          echo "${AIAB_KATA:-0}" ;;
+                CONTAINER_RUNTIME)  echo "${CONTAINER_RUNTIME:-auto}" ;;
+                KATA_RUNTIME)       echo "${KATA_RUNTIME:-kata-runtime}" ;;
+                DEFAULT_MODEL)      echo "${DEFAULT_MODEL:-}" ;;
+                DEFAULT_EFFORT)     echo "${DEFAULT_EFFORT:-}" ;;
+                *) echo "Unknown config key: $key" >&2; return 1 ;;
+            esac
+            return 0
+            ;;
+        set)
+            local key="${1:-}"
+            local val="${2:-}"
+            if [ -z "$key" ]; then
+                echo "Usage: aiab config set <KEY> <VALUE>" >&2
+                return 1
+            fi
+            case "$key" in
+                AIAB_KATA)
+                    if [ "$val" != "0" ] && [ "$val" != "1" ]; then
+                        echo "❌ Error: AIAB_KATA must be 0 (disabled) or 1 (enabled)." >&2
+                        return 1
+                    fi
+                    AIAB_KATA="$val"
+                    ;;
+                CONTAINER_RUNTIME)
+                    if [ "$val" != "auto" ] && [ "$val" != "podman" ] && [ "$val" != "docker" ]; then
+                        echo "❌ Error: CONTAINER_RUNTIME must be 'auto', 'podman', or 'docker'." >&2
+                        return 1
+                    fi
+                    CONTAINER_RUNTIME="$val"
+                    ;;
+                KATA_RUNTIME)
+                    KATA_RUNTIME="$val"
+                    ;;
+                DEFAULT_MODEL)
+                    DEFAULT_MODEL="$val"
+                    ;;
+                DEFAULT_EFFORT)
+                    DEFAULT_EFFORT="$val"
+                    ;;
+                *)
+                    echo "❌ Unknown config key: $key" >&2
+                    return 1
+                    ;;
+            esac
+            save_config
+            echo "✓ Saved ${key}=\"${val}\" to ${AIAB_CONFIG_FILE}"
+            return 0
+            ;;
+        reset)
+            AIAB_KATA=0
+            CONTAINER_RUNTIME="auto"
+            KATA_RUNTIME="kata-runtime"
+            DEFAULT_MODEL=""
+            DEFAULT_EFFORT=""
+            save_config
+            echo "✓ Reset configuration to defaults in ${AIAB_CONFIG_FILE}"
+            return 0
+            ;;
+        -h|--help|help)
+            echo "Usage: aiab config [COMMAND] [ARGS...]"
+            echo ""
+            echo "Commands:"
+            echo "  (none)                    Launch interactive configuration menu"
+            echo "  show / list               Display current configuration settings"
+            echo "  get <KEY>                 Print the value of a configuration key"
+            echo "  set <KEY> <VALUE>         Set a configuration key to a value"
+            echo "  reset                     Reset configuration to defaults"
+            return 0
+            ;;
+        "")
+            if [ -t 0 ]; then
+                interactive_config_menu
+            else
+                cmd_config show
+            fi
+            return 0
+            ;;
+        *)
+            echo "❌ Error: Unknown config command '$action'." >&2
+            echo "Run 'aiab config --help' for usage." >&2
+            return 1
+            ;;
+    esac
+}
+
 # Subcommand: clean
 cmd_clean() {
     check_runtime
@@ -366,6 +665,7 @@ case "${1:-}" in
     rebuild)      cmd_rebuild; exit 0 ;;
     status)       cmd_status; exit 0 ;;
     check-kata)   cmd_check_kata; exit 0 ;;
+    config)       shift; cmd_config "$@"; exit 0 ;;
     clean)        cmd_clean; exit 0 ;;
     backup-auth)  cmd_backup_auth; exit 0 ;;
     reset-auth)   cmd_reset_auth; exit 0 ;;
@@ -374,7 +674,7 @@ esac
 
 check_runtime
 
-# Initialize Kata configuration from environment
+# Initialize Kata configuration from environment / config file
 USE_KATA="${AIAB_KATA:-0}"
 if [ "${AIAB_HYPERVISOR:-}" = "kata" ]; then
     USE_KATA=1
@@ -389,6 +689,8 @@ TARGET_DIR_SET=false
 for arg in "${RAW_ARGS[@]}"; do
     if [ "$arg" = "--kata" ] || [ "$arg" = "--hypervisor" ]; then
         USE_KATA=1
+    elif [ "$arg" = "--no-kata" ] || [ "$arg" = "--no-hypervisor" ]; then
+        USE_KATA=0
     elif [ "$TARGET_DIR_SET" = false ] && [ -d "$arg" ]; then
         TARGET_DIR="$arg"
         TARGET_DIR_SET=true
@@ -459,6 +761,16 @@ if [ "$USE_KATA" = "1" ]; then
         local_kata_target="/usr/bin/kata-runtime"
     fi
     RUN_FLAGS+=("--runtime=${local_kata_target}")
+fi
+
+# Inject default model and effort from config if not overridden on CLI
+if [ "${#FILTERED_ARGS[@]}" -eq 0 ] || [[ "${FILTERED_ARGS[0]}" != "bash" && "${FILTERED_ARGS[0]}" != "sh" ]]; then
+    if [ -n "$DEFAULT_MODEL" ] && [[ " ${FILTERED_ARGS[*]} " != *" --model "* ]]; then
+        FILTERED_ARGS=("--model" "$DEFAULT_MODEL" "${FILTERED_ARGS[@]}")
+    fi
+    if [ -n "$DEFAULT_EFFORT" ] && [[ " ${FILTERED_ARGS[*]} " != *" --effort "* ]]; then
+        FILTERED_ARGS=("--effort" "$DEFAULT_EFFORT" "${FILTERED_ARGS[@]}")
+    fi
 fi
 
 # Generate session container name based on directory basename and PID

@@ -231,6 +231,7 @@ Maintenance and lifecycle operations are built directly into `aiab`:
 
 | Command | Description |
 | :--- | :--- |
+| `aiab config` | Opens interactive settings menu to set default isolation (Kata on/off), engine, and model. |
 | `aiab update` | Pulls latest Ubuntu base and rebuilds the container with the newest `agy` CLI release. |
 | `aiab rebuild` | Forces a complete rebuild from scratch without Docker cache. |
 | `aiab status` | Inspects container images, volume sizes, CLI version, and Kata hypervisor readiness. |
@@ -239,6 +240,64 @@ Maintenance and lifecycle operations are built directly into `aiab`:
 | `aiab backup-auth` | Backs up persistent OAuth tokens and databases to `~/agy-auth-backup-*.tar.gz`. |
 | `aiab reset-auth` | Clears persistent login tokens and prompts for re-authentication. |
 | `aiab uninstall` | Removes the Docker images and symlinks from `~/.local/bin`. |
+
+---
+
+## ⚙️ Persistent Configuration Menu
+
+Instead of passing flags or setting environment variables on every terminal session, you can configure your personal defaults using the interactive settings menu:
+
+```bash
+aiab config
+```
+
+```text
+==========================================================
+           agyInABasket (aiab) Settings Menu              
+==========================================================
+Config file: ~/.config/aiab/config
+
+  1) Hypervisor Isolation (Kata):  [Disabled]
+  2) Default Container Engine:     [auto]
+  3) Kata Runtime Identifier:      [kata-runtime]
+  4) Default Model:                [<none>]
+  5) Default Effort:               [<none>]
+  6) Run Diagnostics (check-kata)
+  r) Reset all to defaults
+  q) Quit / Exit
+==========================================================
+Select an option (1-6, r, q): 
+```
+
+### Scriptable Configuration (CLI)
+You can also view and edit settings programmatically:
+
+```bash
+# View all current settings
+aiab config show
+
+# Enable Kata Containers microVM isolation by default
+aiab config set AIAB_KATA 1
+
+# Disable Kata microVM by default
+aiab config set AIAB_KATA 0
+
+# Set default container engine to podman or docker
+aiab config set CONTAINER_RUNTIME podman
+
+# Set a default agent model
+aiab config set DEFAULT_MODEL "Gemini 2.5 Pro"
+
+# Reset configuration to defaults
+aiab config reset
+```
+
+### Precedence Order
+Configuration settings are resolved with the following priority (highest to lowest):
+1. **CLI Flags** (e.g. `--kata`, `--no-kata`, `--model "..."`)
+2. **Environment Variables** (e.g. `AIAB_KATA=1`, `CONTAINER_RUNTIME=docker`)
+3. **Configuration File** (`~/.config/aiab/config`)
+4. **Hardcoded Defaults** (Standard container, auto engine detection)
 
 ---
 

@@ -95,11 +95,14 @@ assert_contains "$output" "rebuild" "Lists 'rebuild' subcommand"
 assert_contains "$output" "status" "Lists 'status' subcommand"
 assert_contains "$output" "clean" "Lists 'clean' subcommand"
 assert_contains "$output" "check-kata" "Lists 'check-kata' subcommand"
+assert_contains "$output" "config" "Lists 'config' subcommand"
 assert_contains "$output" "backup-auth" "Lists 'backup-auth' subcommand"
 assert_contains "$output" "reset-auth" "Lists 'reset-auth' subcommand"
 assert_contains "$output" "uninstall" "Lists 'uninstall' subcommand"
 assert_contains "$output" "--kata" "Lists '--kata' argument"
+assert_contains "$output" "--no-kata" "Lists '--no-kata' argument"
 assert_contains "$output" "KATA_RUNTIME" "Lists 'KATA_RUNTIME' config"
+assert_contains "$output" "AIAB_CONFIG_FILE" "Lists 'AIAB_CONFIG_FILE' config"
 
 test_case "aiab -h works as shorthand for --help"
 output=$("${AIAB_BIN}" -h 2>&1)
@@ -313,6 +316,67 @@ assert_contains "$env_kata_out" "--runtime=kata-runtime" "AIAB_KATA=1 appends --
 test_case "aiab --hypervisor works as alias for --kata"
 alias_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --hypervisor 2>&1)
 assert_contains "$alias_kata_out" "--runtime=kata-runtime" "--hypervisor flag enables Kata microVM runtime"
+
+# ------------------------------------------------------------
+# Test 11: Configuration Management & Persistence
+# ------------------------------------------------------------
+test_case "aiab config show displays settings and file path"
+TEST_CONFIG="${TEST_SANDBOX}/test_config"
+cfg_show_out=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config show 2>&1)
+assert_contains "$cfg_show_out" "=== agyInABasket Configuration ===" "Displays configuration header"
+assert_contains "$cfg_show_out" "${TEST_CONFIG}" "Displays custom config file path"
+
+test_case "aiab config set and get modify and read persistent settings"
+AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config set AIAB_KATA 1 >/dev/null
+val_kata=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config get AIAB_KATA)
+if [ "$val_kata" = "1" ]; then
+    echo -e "  ${GREEN}✓ PASS:${NC} AIAB_KATA was set and retrieved as '1'"
+    PASSED=$((PASSED + 1))
+else
+    echo -e "  ${RED}✗ FAIL:${NC} Expected AIAB_KATA to be '1', got '$val_kata'"
+    FAILED=$((FAILED + 1))
+fi
+
+AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config set DEFAULT_MODEL "Gemini 2.5 Pro" >/dev/null
+val_model=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config get DEFAULT_MODEL)
+if [ "$val_model" = "Gemini 2.5 Pro" ]; then
+    echo -e "  ${GREEN}✓ PASS:${NC} DEFAULT_MODEL was set and retrieved as 'Gemini 2.5 Pro'"
+    PASSED=$((PASSED + 1))
+else
+    echo -e "  ${RED}✗ FAIL:${NC} Expected DEFAULT_MODEL to be 'Gemini 2.5 Pro', got '$val_model'"
+    FAILED=$((FAILED + 1))
+fi
+
+test_case "aiab activates Kata microVM by default when enabled in config file"
+cfg_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
+assert_contains "$cfg_kata_out" "--runtime=kata-runtime" "Persistent config enabled Kata microVM runtime"
+assert_contains "$cfg_kata_out" "--model Gemini 2.5 Pro" "Persistent config injected default model"
+
+test_case "aiab --no-kata overrides persistent config and disables Kata runtime"
+no_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" --no-kata 2>&1)
+if echo "$no_kata_out" | grep -q -- "--runtime=kata-runtime"; then
+    echo -e "  ${RED}✗ FAIL:${NC} --no-kata failed to disable Kata runtime"
+    FAILED=$((FAILED + 1))
+else
+    echo -e "  ${GREEN}✓ PASS:${NC} --no-kata flag successfully disabled Kata runtime"
+    PASSED=$((PASSED + 1))
+fi
+
+test_case "CLI --model overrides config DEFAULT_MODEL"
+model_override_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" --model "Claude 3.7 Sonnet" 2>&1)
+assert_contains "$model_override_out" "Claude 3.7 Sonnet" "CLI --model overrides config default model"
+
+test_case "aiab config reset restores defaults"
+AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config reset >/dev/null
+reset_kata=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config get AIAB_KATA)
+reset_model=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config get DEFAULT_MODEL)
+if [ "$reset_kata" = "0" ] && [ -z "$reset_model" ]; then
+    echo -e "  ${GREEN}✓ PASS:${NC} Configuration was reset to defaults"
+    PASSED=$((PASSED + 1))
+else
+    echo -e "  ${RED}✗ FAIL:${NC} Reset failed (AIAB_KATA=$reset_kata, DEFAULT_MODEL=$reset_model)"
+    FAILED=$((FAILED + 1))
+fi
 
 # Clean up sandbox
 rm -rf "${TEST_SANDBOX}"
