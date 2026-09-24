@@ -210,11 +210,11 @@ if command -v docker >/dev/null 2>&1; then
     sudo mkdir -p /etc/docker
     if [ -f "$DAEMON_JSON" ]; then
         if command -v jq >/dev/null 2>&1; then
-            sudo jq '.runtimes["kata-runtime"] = {"path": "/usr/local/bin/kata-runtime"}' "$DAEMON_JSON" > "${TMP_DIR}/daemon.json"
+            sudo jq '.runtimes["kata-runtime"] = {"path": "/usr/local/bin/containerd-shim-kata-v2", "runtimeType": "io.containerd.kata.v2"}' "$DAEMON_JSON" > "${TMP_DIR}/daemon.json"
             sudo cp "${TMP_DIR}/daemon.json" "$DAEMON_JSON"
             echo "✓ Added 'kata-runtime' to ${DAEMON_JSON}"
         elif command -v python3 >/dev/null 2>&1; then
-            sudo python3 -c "import json; p='$DAEMON_JSON'; data = json.load(open(p)) if open(p).read().strip() else {}; data.setdefault('runtimes', {})['kata-runtime'] = {'path': '/usr/local/bin/kata-runtime'}; open(p, 'w').write(json.dumps(data, indent=2))"
+            sudo python3 -c "import json; p='$DAEMON_JSON'; data = json.load(open(p)) if open(p).read().strip() else {}; data.setdefault('runtimes', {})['kata-runtime'] = {'path': '/usr/local/bin/containerd-shim-kata-v2', 'runtimeType': 'io.containerd.kata.v2'}; open(p, 'w').write(json.dumps(data, indent=2))"
             echo "✓ Added 'kata-runtime' to ${DAEMON_JSON}"
         else
             echo "ℹ️ Please verify /etc/docker/daemon.json contains the kata-runtime definition."
@@ -224,7 +224,8 @@ if command -v docker >/dev/null 2>&1; then
 {
   "runtimes": {
     "kata-runtime": {
-      "path": "/usr/local/bin/kata-runtime"
+      "path": "/usr/local/bin/containerd-shim-kata-v2",
+      "runtimeType": "io.containerd.kata.v2"
     }
   }
 }
@@ -239,8 +240,8 @@ EOF
 fi
 
 if command -v podman >/dev/null 2>&1; then
-    echo "🦭 Podman detected. aiab will automatically invoke Kata via:"
-    echo "   /usr/local/bin/kata-runtime"
+    echo "🦭 Podman detected. Note: Kata Containers uses the containerd shimv2 protocol supported by Docker."
+    echo "   aiab will automatically route Kata microVM runs to Docker when available."
 fi
 
 # 10. Run verification check

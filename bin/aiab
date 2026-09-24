@@ -814,6 +814,24 @@ if [ ! -d "$TARGET_DIR" ]; then
     exit 1
 fi
 
+# Podman does not support Kata Containers (requires containerd shimv2)
+if [ "$USE_KATA" = "1" ] && [ "$CONTAINER_RUNTIME" = "podman" ]; then
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        echo "ℹ️ Note: Podman does not support Kata Containers (shimv2 protocol required)."
+        echo "   Automatically switching to Docker for microVM isolation..."
+        CONTAINER_RUNTIME="docker"
+    else
+        echo "❌ Error: Podman does not support Kata Containers." >&2
+        echo "   Kata Containers requires a containerd-based engine (such as Docker) using the shimv2 protocol." >&2
+        echo "   Podman attempts to invoke Kata via legacy OCI commands, which fails with: Invalid command \"create\"." >&2
+        echo "" >&2
+        echo "   To resolve:" >&2
+        echo "   1. If Docker is installed, start Docker and run: CONTAINER_RUNTIME=docker aiab" >&2
+        echo "   2. Or run standard container isolation with Podman: aiab --no-kata" >&2
+        exit 1
+    fi
+fi
+
 # Check if image exists; if agy-yolo doesn't exist, try agy-basket:latest
 if ! "$CONTAINER_RUNTIME" image inspect "$AGY_IMAGE" >/dev/null 2>&1; then
     if "$CONTAINER_RUNTIME" image inspect "${BASKET_TAG}" >/dev/null 2>&1; then

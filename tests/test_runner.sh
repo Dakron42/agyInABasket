@@ -425,6 +425,10 @@ assert_contains "$(cat "${INSTALL_KATA_SH}")" "Clean up prior installation to pr
 assert_contains "$(cat "${INSTALL_KATA_SH}")" "rm -rf /opt/kata" "install-kata.sh cleans existing /opt/kata directory"
 assert_contains "$(cat "${INSTALL_KATA_SH}")" "rm -f /usr/local/bin/kata-runtime" "install-kata.sh cleans existing symlinks"
 
+test_case "aiab handles Podman Kata incompatibility gracefully"
+podman_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=podman KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --kata 2>&1 || true)
+assert_contains "$podman_kata_out" "Podman does not support Kata Containers" "Informs user of Podman Kata incompatibility"
+
 # Clean up sandbox
 rm -rf "${TEST_SANDBOX}"
 
