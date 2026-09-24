@@ -126,7 +126,35 @@ if ! curl -fL --progress-bar "$DOWNLOAD_URL" -o "${TMP_DIR}/${TAR_NAME}"; then
     exit 1
 fi
 
-# 6. Extract to /opt/kata
+# 6. Clean up prior installation to prevent version conflicts
+echo "🧹 Checking for existing Kata Containers installation..."
+OLD_VERSION=""
+if [ -f "/opt/kata/VERSION" ]; then
+    OLD_VERSION="$(cat /opt/kata/VERSION 2>/dev/null | tr -d '[:space:]' || true)"
+elif command -v kata-runtime >/dev/null 2>&1; then
+    OLD_VERSION="$(kata-runtime --version 2>/dev/null | head -n 1 | awk '{print $3}' || true)"
+fi
+
+if [ -d "/opt/kata" ] || [ -L "/usr/local/bin/kata-runtime" ] || [ -e "/usr/local/bin/kata-runtime" ] || [ -L "/usr/local/bin/kata-ctl" ] || [ -e "/usr/local/bin/kata-ctl" ]; then
+    if [ -n "$OLD_VERSION" ]; then
+        echo "   Found existing installation (version: ${OLD_VERSION}). Removing to prevent version conflicts..."
+    else
+        echo "   Found existing /opt/kata or symlinks. Removing to ensure clean installation..."
+    fi
+    sudo rm -rf /opt/kata
+    sudo rm -f /usr/local/bin/kata-runtime /usr/local/bin/kata-ctl /usr/local/bin/containerd-shim-kata-v2
+    echo "✓ Prior installation cleaned up."
+else
+    echo "✓ No existing installation found."
+fi
+
+if command -v dpkg >/dev/null 2>&1 && dpkg -s kata-containers >/dev/null 2>&1; then
+    echo "ℹ️ Note: An older 'kata-containers' package was found in dpkg/apt."
+    echo "   The new static release in /opt/kata and /usr/local/bin will take precedence."
+    echo "   (You may optionally remove the distro package: sudo apt-get remove --purge -y kata-containers)"
+fi
+
+# 7. Extract to /opt/kata
 echo "📦 Extracting Kata Containers static bundle to /opt/kata..."
 sudo mkdir -p /opt/kata
 if [[ "$TAR_NAME" == *.zst ]]; then
@@ -139,7 +167,7 @@ else
     sudo tar -xf "${TMP_DIR}/${TAR_NAME}" -C /
 fi
 
-# 7. Create symlinks in /usr/local/bin
+# 8. Create symlinks in /usr/local/bin
 echo "🔗 Symlinking binaries to /usr/local/bin..."
 sudo mkdir -p /usr/local/bin
 if [ -e "/opt/kata/bin/kata-runtime" ]; then
@@ -154,7 +182,7 @@ elif [ -e "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" ]; then
     sudo ln -sf /opt/kata/runtime-rs/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
 fi
 
-# 8. Container engine registration
+# 9. Container engine registration
 if command -v docker >/dev/null 2>&1; then
     echo "🐳 Configuring Docker daemon for Kata Containers..."
     DAEMON_JSON="/etc/docker/daemon.json"
@@ -194,7 +222,7 @@ if command -v podman >/dev/null 2>&1; then
     echo "   /usr/local/bin/kata-runtime"
 fi
 
-# 9. Run verification check
+# 10. Run verification check
 echo ""
 echo "🩺 Running Kata verification check..."
 if [ -x "/usr/local/bin/kata-runtime" ]; then

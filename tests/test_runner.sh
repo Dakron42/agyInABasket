@@ -420,6 +420,11 @@ chmod +x "${OPT_KATA_DIR}/kata-runtime"
 opt_kata_out=$(PATH="${OPT_KATA_DIR}:${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
 assert_contains "$opt_kata_out" "--runtime=kata-runtime" "Auto-detected Kata static binary in /opt/kata/bin"
 
+test_case "scripts/install-kata.sh detects and cleans up existing installations"
+assert_contains "$(cat "${INSTALL_KATA_SH}")" "Clean up prior installation to prevent version conflicts" "install-kata.sh includes prior version cleanup step"
+assert_contains "$(cat "${INSTALL_KATA_SH}")" "rm -rf /opt/kata" "install-kata.sh cleans existing /opt/kata directory"
+assert_contains "$(cat "${INSTALL_KATA_SH}")" "rm -f /usr/local/bin/kata-runtime" "install-kata.sh cleans existing symlinks"
+
 # Clean up sandbox
 rm -rf "${TEST_SANDBOX}"
 
