@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+#
+# aiab: Antigravity In A Basket
+# Host launcher and manager for isolated Antigravity YOLO container
+#
+
+set -e
+
+# Configuration (can be overridden via environment variables)
+AGY_IMAGE="${AGY_IMAGE:-agy-yolo:latest}"
+BASKET_TAG="${BASKET_TAG:-agy-basket:latest}"
+AGY_DATA_VOLUME="${AGY_DATA_VOLUME:-agy-data}"
+AGY_CONFIG_VOLUME="${AGY_CONFIG_VOLUME:-agy-config}"
+
+# Determine repository root directory if available (for rebuild/update)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/../Dockerfile" ]; then
+    REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+else
+    REPO_DIR=""
+fi
+
+show_help() {
+    cat <<EOF
+aiab (Antigravity In A Basket) - Containerized Google Antigravity Runner (YOLO Mode)
+
+Usage:
+  aiab [DIRECTORY] [OPTIONS...]
+  aiab [DIRECTORY] bash
+  aiab [COMMAND]
+
+Commands:
+  update        Pull latest base image and rebuild container with newest agy CLI
+  rebuild       Force clean rebuild of the Docker image without cache
+  status        Display container image, volume sizes, and agy CLI version
+  clean         Prune stopped agy containers and dangling images
+  backup-auth   Backup persistent auth tokens and conversations to a tar archive
+  reset-auth    Reset persistent authentication (clears stored tokens and databases)
+  uninstall     Remove image, volumes, and installed wrappers from ~/.local/bin
+
+Arguments:
+  DIRECTORY     Path to project directory (default: current directory '.')
+  OPTIONS       Flags forwarded to agy (e.g., --continue, --model, --effort)
+  bash / sh     Launch an interactive bash shell inside the container instead of agy
+
+Examples:
+  aiab                              # Launch agy in current directory
+  aiab update                       # Update container with the latest agy CLI release
+  aiab status                       # Show Docker image and volume status
+  aiab ~/projects/my-app            # Launch agy in specific project directory
+  aiab . --continue                 # Resume most recent conversation in current directory
+  aiab . bash                       # Open an interactive bash shell in the project container
+
+Configuration:
+  AGY_IMAGE         Docker image to run (default: agy-yolo:latest)
+  AGY_DATA_VOLUME   Docker volume for persistent auth & tokens (default: agy-data)
+  AGY_CONFIG_VOLUME Docker volume for persistent configs (default: agy-config)
+EOF
+}
+
+check_docker() {
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "❌ Error: Docker is not installed or not in PATH." >&2
+        exit 1
+    fi
+
+    if ! docker info >/dev/null 2>&1; then
+        echo "❌ Error: Cannot connect to Docker daemon. Is Docker running, and is your user in the 'docker' group?" >&2
+        exit 1
+    fi
+}
+
+find_repo_dir() {
+    if [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/Dockerfile" ]; then
+        echo "$REPO_DIR"
+        return 0
+    fi
+    # Search common location if symlinked
+    local real_script
+    real_script="$(realpath "${BASH_SOURCE[0]}")"
+    local candidate
+    candidate="$(cd "$(dirname "$real_script")/.." 2>/dev/null && pwd)"
+    if [ -f "$candidate/Dockerfile" ]; then
+        echo "$candidate"
+        return 0
+    fi
+    echo ""
+}
+
+# Subcommand: update
+cmd_update() {
+    check_docker
+    local repo
+    repo="$(find_repo_dir)"
+    if [ -z "$repo" ]; then
+        echo "❌ Error: Could not locate agyInABasket repository containing Dockerfile." >&2
+        exit 1
+    fi
+
+    local host_uid host_gid
+    host_uid="$(id -u)"
+    host_gid="$(id -g)"
+
+    echo "🔄 Pulling latest base image and updating agy CLI..."
+    docker pull ubuntu:24.04
+    docker build \
+        --no-cache \
+        --build-arg USER_UID="${host_uid}" \
+        --build-arg USER_GID="${host_gid}" \
+        -t "${AGY_IMAGE}" \
+        -t "${BASKET_TAG}" \
+        "$repo"
+
+    echo "✓ Update complete! aiab is now running the latest container image."
+}
+
+# Subcommand: rebuild
+cmd_rebuild() {
+    check_docker
+    local repo
+    repo="$(find_repo_dir)"
+    if [ -z "$repo" ]; then
+        echo "❌ Error: Could not locate agyInABasket repository containing Dockerfile." >&2
+        exit 1
+    fi
+
+    local host_uid host_gid
+    host_uid="$(id -u)"
+    host_gid="$(id -g)"
+
+    echo "🔨 Forcing clean rebuild without cache..."
+    docker build \
+        --no-cache \
+        --build-arg USER_UID="${host_uid}" \
+        --build-arg USER_GID="${host_gid}" \
+        -t "${AGY_IMAGE}" \
+        -t "${BASKET_TAG}" \
+        "$repo"
+
+    echo "✓ Rebuild complete!"
+}
+
+# Subcommand: status
+cmd_status() {
+    check_docker
+    echo "=== agyInABasket (aiab) Status ==="
+    echo ""
+    echo "--- Docker Image ---"
+    docker images "${AGY_IMAGE}" --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}"
+    echo ""
+    echo "--- Docker Volumes ---"
+    docker volume ls --filter "name=agy-"
+    echo ""
+    echo "--- agy CLI Version (inside container) ---"
+    docker run --rm "${AGY_IMAGE}" agy changelog 2>/dev/null | head -n 10 || echo "Version check unavailable."
+}
+
+# Subcommand: clean
+cmd_clean() {
+    check_docker
+    echo "🧹 Pruning stopped agy containers and dangling Docker images..."
+    docker ps -a --filter "name=agy-" --filter "status=exited" -q | xargs -r docker rm 2>/dev/null || true
+    docker image prune -f
+    echo "✓ Cleanup finished!"
+}
+
+# Subcommand: backup-auth
+cmd_backup_auth() {
+    check_docker
+    local backup_file="${HOME}/agy-auth-backup-$(date +%Y%m%d_%H%M%S).tar.gz"
+    echo "💾 Backing up ${AGY_DATA_VOLUME} to ${backup_file}..."
+    docker run --rm \
+        -v "${AGY_DATA_VOLUME}:/data:ro" \
+        -v "${HOME}:/backup" \
+        busybox tar -czf "/backup/$(basename "${backup_file}")" -C /data .
+    echo "✓ Backup created at: ${backup_file}"
+}
+
+# Subcommand: reset-auth
+cmd_reset_auth() {
+    check_docker
+    read -rp "⚠️ Are you sure you want to reset persistent auth data? You will need to log into Antigravity again. (y/N) " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        echo "🗑️ Resetting ${AGY_DATA_VOLUME} and ${AGY_CONFIG_VOLUME}..."
+        docker volume rm -f "${AGY_DATA_VOLUME}" "${AGY_CONFIG_VOLUME}" 2>/dev/null || true
+        docker volume create "${AGY_DATA_VOLUME}" >/dev/null
+        docker volume create "${AGY_CONFIG_VOLUME}" >/dev/null
+        echo "✓ Auth reset. Fresh volumes created."
+    else
+        echo "Operation cancelled."
+    fi
+}
+
+# Subcommand: uninstall
+cmd_uninstall() {
+    check_docker
+    read -rp "⚠️ This will delete the agy-yolo Docker images and wrappers from ~/.local/bin. Proceed? (y/N) " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        rm -f "${HOME}/.local/bin/aiab"
+        docker rmi -f "${AGY_IMAGE}" "${BASKET_TAG}" 2>/dev/null || true
+        echo "✓ Binary and images removed. Persistent volumes ('${AGY_DATA_VOLUME}') were kept intact."
+    else
+        echo "Uninstall cancelled."
+    fi
+}
+
+# Check for help flag
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    show_help
+    exit 0
+fi
+
+# Route maintenance subcommands
+case "${1:-}" in
+    update)       cmd_update; exit 0 ;;
+    rebuild)      cmd_rebuild; exit 0 ;;
+    status)       cmd_status; exit 0 ;;
+    clean)        cmd_clean; exit 0 ;;
+    backup-auth)  cmd_backup_auth; exit 0 ;;
+    reset-auth)   cmd_reset_auth; exit 0 ;;
+    uninstall)    cmd_uninstall; exit 0 ;;
+esac
+
+check_docker
+
+# Determine target workspace directory
+TARGET_DIR="."
+if [ $# -gt 0 ]; then
+    if [ -d "$1" ]; then
+        TARGET_DIR="$1"
+        shift
+    elif [[ "$1" != -* && "$1" != "bash" && "$1" != "sh" ]]; then
+        # Specified path that does not exist
+        if [ ! -e "$1" ]; then
+            echo "❌ Error: Directory does not exist: $1" >&2
+            exit 1
+        fi
+        TARGET_DIR="$1"
+        shift
+    fi
+fi
+
+# Resolve absolute path
+TARGET_DIR="$(realpath "$TARGET_DIR")"
+
+if [ ! -d "$TARGET_DIR" ]; then
+    echo "❌ Error: Target path is not a directory: $TARGET_DIR" >&2
+    exit 1
+fi
+
+# Check if image exists; if agy-yolo doesn't exist, try agy-basket:latest
+if ! docker image inspect "$AGY_IMAGE" >/dev/null 2>&1; then
+    if docker image inspect "${BASKET_TAG}" >/dev/null 2>&1; then
+        AGY_IMAGE="${BASKET_TAG}"
+    else
+        echo "❌ Error: Docker image '$AGY_IMAGE' not found." >&2
+        echo "Please build the image first by running:" >&2
+        echo "  ./scripts/install.sh" >&2
+        exit 1
+    fi
+fi
+
+# Ensure persistent Docker volumes exist
+docker volume create "$AGY_DATA_VOLUME" >/dev/null 2>&1 || true
+docker volume create "$AGY_CONFIG_VOLUME" >/dev/null 2>&1 || true
+
+# Setup terminal flags (-it if connected to interactive terminal)
+DOCKER_TTY_FLAGS=()
+if [ -t 0 ] && [ -t 1 ]; then
+    DOCKER_TTY_FLAGS+=("-it")
+fi
+
+# Generate session container name based on directory basename and PID
+SESSION_NAME="agy-$(basename "$TARGET_DIR" | tr -c 'a-zA-Z0-9_' '_')-$$"
+
+echo "🧺 Launching Antigravity in isolated basket: $SESSION_NAME"
+echo "📂 Workspace: $TARGET_DIR"
+echo "💾 Persisting auth data in Docker volume: $AGY_DATA_VOLUME"
+
+exec docker run "${DOCKER_TTY_FLAGS[@]}" --rm \
+    --name "$SESSION_NAME" \
+    -e TERM="${TERM:-xterm-256color}" \
+    -v "$TARGET_DIR:/home/minty/workspace" \
+    -v "$AGY_DATA_VOLUME:/home/minty/.gemini" \
+    -v "$AGY_CONFIG_VOLUME:/home/minty/.config" \
+    "$AGY_IMAGE" "$@"
