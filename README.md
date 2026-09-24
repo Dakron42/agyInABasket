@@ -21,6 +21,7 @@ Running YOLO mode directly on a personal host workstation carries risk:
 - **Sandbox Security:** The container only sees the specific project folder mounted into `/home/minty/workspace`. Host root and parent directories remain completely inaccessible.
 - **True Host UID/GID Alignment:** The container dynamically builds matching your host user's exact UID and GID (e.g. `1000:1000`). Files created by the agent are owned by *you* on the host—no `root` ownership bugs or `git safe.directory` permission errors.
 - **Rootless Podman Ready:** Auto-detects Podman and injects `--userns=keep-id` and SELinux volume relabeling (`:Z`) out of the box.
+- **Optional Hardware Hypervisor Isolation (Kata Containers):** Run the container inside a dedicated hardware KVM microVM using `--kata`. Even a root-level kernel exploit cannot escape into the host operating system.
 - **Persistent Auth & Sessions:** Google OAuth tokens, conversation logs, and settings are saved into a dedicated container volume (`agy-data`), so you log in once and stay authenticated across all projects and sessions.
 - **Pre-baked Developer Toolchains:** Pre-loaded with Python 3, pip, venv, Node.js, npm, build-essential, git, ripgrep, and jq, plus passwordless `sudo` inside the container for ephemeral dependencies.
 
@@ -119,6 +120,81 @@ To inspect the container environment or test custom binaries:
 aiab . bash
 ```
 
+### Hardware Hypervisor Isolation (Kata Containers)
+Run Antigravity enclosed inside a dedicated **KVM microVM** using Kata Containers:
+
+```bash
+# Launch current directory with hardware microVM isolation
+aiab --kata
+
+# Specify project directory and Kata microVM
+aiab ~/code/my-web-app --kata
+
+# Or enable hypervisor isolation permanently by adding to ~/.bashrc:
+export AIAB_KATA=1
+```
+
+---
+
+## 🛡️ Hypervisor Isolation with Kata Containers
+
+While standard containers provide process and namespace isolation, they share the host operating system's Linux kernel. For highest-assurance untrusted code execution, `aiab` supports **Kata Containers**.
+
+```mermaid
+flowchart TD
+    subgraph Host["Host Machine"]
+        HostKernel["Host Linux Kernel + KVM (/dev/kvm)"]
+        Launcher["aiab --kata"]
+    end
+
+    subgraph MicroVM["Kata Containers MicroVM (QEMU / Cloud-Hypervisor)"]
+        GuestKernel["Isolated Guest Linux Kernel"]
+        subgraph Basket["Basket Container"]
+            AGY["Google Antigravity CLI (YOLO Mode)"]
+            WS["Workspace (/home/minty/workspace)"]
+        end
+    end
+
+    Launcher --> HostKernel
+    HostKernel --> MicroVM
+    GuestKernel --> Basket
+```
+
+### Why Use Kata Containers?
+1. **True VM Boundary:** The basket runs inside its own lightweight hardware microVM backed by Linux KVM.
+2. **Exploit Containment:** Even if an autonomous agent runs malicious code that attempts a Linux kernel exploit or `setuid` privilege escalation, the exploit only compromises the temporary microVM guest kernel—leaving your host system and personal files completely untouched.
+3. **Virtio-FS Performance:** Project workspace files are shared into the microVM using `virtio-fs` for near-native read/write speeds.
+
+### Host Setup & Verification
+Run the built-in diagnostic tool to verify host hardware virtualization and Kata runtime status:
+
+```bash
+aiab check-kata
+```
+
+#### Installing Kata Containers on Ubuntu / Debian:
+```bash
+sudo apt-get update
+sudo apt-get install -y kata-containers
+
+# Ensure your host user has access to /dev/kvm:
+sudo usermod -aG kvm $USER
+newgrp kvm
+```
+
+#### Configuring Docker (if using Docker runtime):
+Register the Kata runtime in `/etc/docker/daemon.json`:
+```json
+{
+  "runtimes": {
+    "kata-runtime": {
+      "path": "/usr/bin/kata-runtime"
+    }
+  }
+}
+```
+Then restart Docker: `sudo systemctl restart docker`. (Podman detects and uses Kata directly).
+
 ---
 
 ## 🐚 Shell Function (`~/.bashrc`)
@@ -157,7 +233,8 @@ Maintenance and lifecycle operations are built directly into `aiab`:
 | :--- | :--- |
 | `aiab update` | Pulls latest Ubuntu base and rebuilds the container with the newest `agy` CLI release. |
 | `aiab rebuild` | Forces a complete rebuild from scratch without Docker cache. |
-| `aiab status` | Inspects container images, volume sizes, and CLI version. |
+| `aiab status` | Inspects container images, volume sizes, CLI version, and Kata hypervisor readiness. |
+| `aiab check-kata` | Runs diagnostic checks on hardware KVM virtualization, Kata binaries, and runtime daemons. |
 | `aiab clean` | Removes dangling Docker images and stopped `agy` containers. |
 | `aiab backup-auth` | Backs up persistent OAuth tokens and databases to `~/agy-auth-backup-*.tar.gz`. |
 | `aiab reset-auth` | Clears persistent login tokens and prompts for re-authentication. |

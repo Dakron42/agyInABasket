@@ -13,6 +13,10 @@ BASKET_TAG="${BASKET_TAG:-agy-basket:latest}"
 AGY_DATA_VOLUME="${AGY_DATA_VOLUME:-agy-data}"
 AGY_CONFIG_VOLUME="${AGY_CONFIG_VOLUME:-agy-config}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-}"
+AIAB_KATA="${AIAB_KATA:-0}"
+AIAB_HYPERVISOR="${AIAB_HYPERVISOR:-}"
+KATA_RUNTIME="${KATA_RUNTIME:-kata-runtime}"
+KVM_DEVICE="${KVM_DEVICE:-/dev/kvm}"
 
 # Determine repository root directory if available (for rebuild/update)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +39,7 @@ Commands:
   update        Pull latest base image and rebuild container with newest agy CLI
   rebuild       Force clean rebuild of the container image without cache
   status        Display container image, volume sizes, and agy CLI version
+  check-kata    Verify host KVM support and Kata Containers runtime status
   clean         Prune stopped containers and dangling images
   backup-auth   Backup persistent auth tokens and conversations to a tar archive
   reset-auth    Reset persistent authentication (clears stored tokens and databases)
@@ -43,10 +48,14 @@ Commands:
 Arguments:
   DIRECTORY     Path to project directory (default: current directory '.')
   OPTIONS       Flags forwarded to agy (e.g., --continue, --model, --effort)
+  --kata / --hypervisor  Launch container enclosed in a Kata Containers KVM microVM
   bash / sh     Launch an interactive bash shell inside the container instead of agy
 
 Examples:
   aiab                              # Launch agy in current directory
+  aiab --kata                       # Launch with hardware KVM microVM isolation
+  aiab ~/projects/my-app --kata     # Launch project enclosed in Kata microVM
+  aiab check-kata                   # Run hypervisor and KVM diagnostics
   aiab update                       # Update container with the latest agy CLI release
   aiab status                       # Show container image and volume status
   aiab ~/projects/my-app            # Launch agy in specific project directory
@@ -58,6 +67,8 @@ Configuration:
   AGY_IMAGE         Container image to run (default: agy-yolo:latest)
   AGY_DATA_VOLUME   Container volume for persistent auth & tokens (default: agy-data)
   AGY_CONFIG_VOLUME Container volume for persistent configs (default: agy-config)
+  AIAB_KATA         Enable Kata Containers microVM hypervisor isolation by default (1/0)
+  KATA_RUNTIME      Kata runtime name or binary path (default: kata-runtime)
 EOF
 }
 
@@ -178,8 +189,120 @@ cmd_status() {
     echo "--- Persistent Volumes ---"
     "$CONTAINER_RUNTIME" volume ls --filter "name=agy-"
     echo ""
+    echo "--- Hypervisor Isolation (Kata Containers) ---"
+    if [ -e "${KVM_DEVICE}" ]; then
+        if [ -r "${KVM_DEVICE}" ] && [ -w "${KVM_DEVICE}" ]; then
+            echo "Hardware KVM: Available & Accessible (${KVM_DEVICE})"
+        else
+            echo "Hardware KVM: Present (${KVM_DEVICE}), permissions needed: sudo usermod -aG kvm \$USER"
+        fi
+    else
+        echo "Hardware KVM: Not detected (enable virtualization in BIOS/UEFI)"
+    fi
+    if command -v kata-runtime >/dev/null 2>&1; then
+        echo "Kata Runtime: Installed ($(command -v kata-runtime))"
+    elif [ -x "/usr/bin/kata-runtime" ]; then
+        echo "Kata Runtime: Installed (/usr/bin/kata-runtime)"
+    else
+        echo "Kata Runtime: Not installed (run 'aiab check-kata' for install details)"
+    fi
+    echo ""
     echo "--- agy CLI Version (inside container) ---"
     "$CONTAINER_RUNTIME" run --rm "${AGY_IMAGE}" agy changelog 2>/dev/null | head -n 10 || echo "Version check unavailable."
+}
+
+# Subcommand: check-kata
+cmd_check_kata() {
+    echo "=========================================================="
+    echo "     Kata Containers & KVM Hypervisor Diagnostic         "
+    echo "=========================================================="
+    echo ""
+    local all_good=true
+
+    # 1. Check KVM device
+    echo "1. Checking hardware virtualization (${KVM_DEVICE})..."
+    if [ -e "${KVM_DEVICE}" ]; then
+        if [ -r "${KVM_DEVICE}" ] && [ -w "${KVM_DEVICE}" ]; then
+            echo "   ✓ ${KVM_DEVICE} exists and is accessible by current user."
+        else
+            echo "   ⚠️ ${KVM_DEVICE} exists, but current user lacks read/write permissions."
+            echo "      Fix by running: sudo usermod -aG kvm \$USER && newgrp kvm"
+            all_good=false
+        fi
+    else
+        echo "   ❌ ${KVM_DEVICE} not found."
+        echo "      Ensure CPU virtualization (Intel VT-x or AMD-V) is enabled in your BIOS/UEFI."
+        all_good=false
+    fi
+    echo ""
+
+    # 2. Check Kata runtime binary
+    echo "2. Checking Kata Containers installation..."
+    local kata_bin=""
+    if command -v kata-runtime >/dev/null 2>&1; then
+        kata_bin="$(command -v kata-runtime)"
+    elif [ -x "/usr/bin/kata-runtime" ]; then
+        kata_bin="/usr/bin/kata-runtime"
+    fi
+
+    if [ -n "$kata_bin" ]; then
+        echo "   ✓ kata-runtime found at: $kata_bin"
+        if "$kata_bin" kata-check >/dev/null 2>&1; then
+            echo "   ✓ 'kata-runtime kata-check' passed successfully."
+        else
+            echo "   ℹ️ Note: 'kata-runtime kata-check' reported host warnings or non-zero exit."
+        fi
+    else
+        echo "   ❌ kata-runtime is not installed on the host."
+        echo "      To install Kata Containers on Ubuntu/Debian:"
+        echo "        sudo apt-get update && sudo apt-get install -y kata-containers"
+        echo "      Or visit: https://github.com/kata-containers/kata-containers"
+        all_good=false
+    fi
+    echo ""
+
+    # 3. Check Container runtime integration
+    echo "3. Checking container runtime configuration..."
+    local runtime_found=""
+    if [ -n "$CONTAINER_RUNTIME" ] && command -v "$CONTAINER_RUNTIME" >/dev/null 2>&1; then
+        runtime_found="$CONTAINER_RUNTIME"
+    elif command -v podman >/dev/null 2>&1; then
+        runtime_found="podman"
+    elif command -v docker >/dev/null 2>&1; then
+        runtime_found="docker"
+    fi
+
+    if [ -z "$runtime_found" ]; then
+        echo "   ❌ Neither Podman nor Docker was found in PATH."
+        all_good=false
+    else
+        echo "   Detected container engine: ${runtime_found}"
+        if [ "$runtime_found" = "docker" ]; then
+            if docker info 2>/dev/null | grep -qi "kata"; then
+                echo "   ✓ Kata runtime is registered in Docker daemon."
+            else
+                echo "   ℹ️ Docker is active. To register Kata runtime in Docker (/etc/docker/daemon.json):"
+                echo '      { "runtimes": { "kata-runtime": { "path": "/usr/bin/kata-runtime" } } }'
+                echo "      Then restart docker: sudo systemctl restart docker"
+            fi
+        elif [ "$runtime_found" = "podman" ]; then
+            echo "   ✓ Podman detected. Podman supports Kata directly via:"
+            echo "     --runtime=/usr/bin/kata-runtime or --runtime=kata-runtime"
+        fi
+    fi
+    echo ""
+
+    if [ "$all_good" = true ]; then
+        echo "🎉 System is ready! You can launch with hypervisor isolation using:"
+        echo "   aiab --kata"
+        echo "   or: AIAB_KATA=1 aiab"
+        echo "=========================================================="
+        return 0
+    else
+        echo "⚠️  Please address the items above before running aiab with --kata."
+        echo "=========================================================="
+        return 1
+    fi
 }
 
 # Subcommand: clean
@@ -242,6 +365,7 @@ case "${1:-}" in
     update)       cmd_update; exit 0 ;;
     rebuild)      cmd_rebuild; exit 0 ;;
     status)       cmd_status; exit 0 ;;
+    check-kata)   cmd_check_kata; exit 0 ;;
     clean)        cmd_clean; exit 0 ;;
     backup-auth)  cmd_backup_auth; exit 0 ;;
     reset-auth)   cmd_reset_auth; exit 0 ;;
@@ -250,21 +374,35 @@ esac
 
 check_runtime
 
-# Determine target workspace directory
+# Initialize Kata configuration from environment
+USE_KATA="${AIAB_KATA:-0}"
+if [ "${AIAB_HYPERVISOR:-}" = "kata" ]; then
+    USE_KATA=1
+fi
+
+# Parse arguments: extract target directory, --kata / --hypervisor flags, and forwarded options
+RAW_ARGS=("$@")
+FILTERED_ARGS=()
 TARGET_DIR="."
-if [ $# -gt 0 ]; then
-    if [ -d "$1" ]; then
-        TARGET_DIR="$1"
-        shift
-    elif [[ "$1" != -* && "$1" != "bash" && "$1" != "sh" ]]; then
-        if [ ! -e "$1" ]; then
-            echo "❌ Error: Directory does not exist: $1" >&2
+TARGET_DIR_SET=false
+
+for arg in "${RAW_ARGS[@]}"; do
+    if [ "$arg" = "--kata" ] || [ "$arg" = "--hypervisor" ]; then
+        USE_KATA=1
+    elif [ "$TARGET_DIR_SET" = false ] && [ -d "$arg" ]; then
+        TARGET_DIR="$arg"
+        TARGET_DIR_SET=true
+    elif [ "$TARGET_DIR_SET" = false ] && [[ "$arg" != -* && "$arg" != "bash" && "$arg" != "sh" ]]; then
+        if [ ! -e "$arg" ]; then
+            echo "❌ Error: Directory does not exist: $arg" >&2
             exit 1
         fi
-        TARGET_DIR="$1"
-        shift
+        TARGET_DIR="$arg"
+        TARGET_DIR_SET=true
+    else
+        FILTERED_ARGS+=("$arg")
     fi
-fi
+done
 
 TARGET_DIR="$(realpath "$TARGET_DIR")"
 
@@ -302,10 +440,34 @@ if [ "$CONTAINER_RUNTIME" = "podman" ]; then
     VOLUME_SUFFIX=":Z"
 fi
 
+# Hypervisor (Kata Containers) validation and configuration
+if [ "$USE_KATA" = "1" ]; then
+    if [ ! -e "${KVM_DEVICE}" ]; then
+        echo "❌ Error: ${KVM_DEVICE} not found." >&2
+        echo "Hardware virtualization is required for Kata Containers." >&2
+        echo "Please enable Intel VT-x or AMD-V in your BIOS/UEFI settings, or run without --kata." >&2
+        exit 1
+    fi
+    if [ ! -r "${KVM_DEVICE}" ] || [ ! -w "${KVM_DEVICE}" ]; then
+        echo "❌ Error: Permission denied accessing ${KVM_DEVICE}." >&2
+        echo "Please add your user to the kvm group: sudo usermod -aG kvm \$USER" >&2
+        exit 1
+    fi
+
+    local_kata_target="${KATA_RUNTIME}"
+    if [ "$CONTAINER_RUNTIME" = "podman" ] && [ -x "/usr/bin/kata-runtime" ] && [ "${KATA_RUNTIME}" = "kata-runtime" ]; then
+        local_kata_target="/usr/bin/kata-runtime"
+    fi
+    RUN_FLAGS+=("--runtime=${local_kata_target}")
+fi
+
 # Generate session container name based on directory basename and PID
 SESSION_NAME="agy-$(basename "$TARGET_DIR" | tr -c 'a-zA-Z0-9_' '_')-$$"
 
 echo "🧺 Launching Antigravity via ${CONTAINER_RUNTIME} in isolated basket: $SESSION_NAME"
+if [ "$USE_KATA" = "1" ]; then
+    echo "🛡️  Hypervisor Isolation: Kata Containers microVM active (KVM hardware virtualization)"
+fi
 echo "📂 Workspace: $TARGET_DIR"
 echo "💾 Persisting auth data in volume: $AGY_DATA_VOLUME"
 
@@ -315,4 +477,4 @@ exec "$CONTAINER_RUNTIME" run "${RUN_FLAGS[@]}" --rm \
     -v "$TARGET_DIR:/home/minty/workspace${VOLUME_SUFFIX}" \
     -v "$AGY_DATA_VOLUME:/home/minty/.gemini" \
     -v "$AGY_CONFIG_VOLUME:/home/minty/.config" \
-    "$AGY_IMAGE" "$@"
+    "$AGY_IMAGE" "${FILTERED_ARGS[@]}"

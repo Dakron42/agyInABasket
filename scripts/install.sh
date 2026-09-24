@@ -86,7 +86,24 @@ if [[ ":$PATH:" != *":${BIN_DIR}:"* ]]; then
     echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
-# 5. Shell integration advice
+# 5. Hypervisor Isolation check (Kata Containers)
+echo ""
+echo "🛡️ Hypervisor Isolation Check (Kata Containers):"
+if [ -e "/dev/kvm" ]; then
+    echo "✓ Hardware virtualization (/dev/kvm) detected on host."
+    if command -v kata-runtime >/dev/null 2>&1 || [ -x "/usr/bin/kata-runtime" ]; then
+        echo "✓ Kata Containers runtime detected! You can launch with microVM isolation using:"
+        echo "    aiab --kata"
+    else
+        echo "ℹ️ Kata Containers is not installed. Standard container isolation will be used."
+        echo "  To enable hardware microVM isolation on Ubuntu/Debian:"
+        echo "    sudo apt-get update && sudo apt-get install -y kata-containers"
+    fi
+else
+    echo "ℹ️ /dev/kvm device not found. Standard container isolation will be used."
+fi
+
+# 6. Shell integration advice
 SHELL_INTEGRATION_LINE="source \"${REPO_DIR}/shell/aiab.bash\""
 TARGET_RC="${HOME}/.bashrc"
 if [ -f "${HOME}/.bash_aliases" ]; then
@@ -109,4 +126,5 @@ echo "🎉 Installation complete!"
 echo "Run Antigravity anywhere via:"
 echo "  aiab"
 echo "  aiab /path/to/project"
+echo "  aiab --kata                     # (With Kata microVM)"
 echo "=========================================================="

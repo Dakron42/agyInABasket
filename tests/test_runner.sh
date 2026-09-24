@@ -94,9 +94,12 @@ assert_contains "$output" "update" "Lists 'update' subcommand"
 assert_contains "$output" "rebuild" "Lists 'rebuild' subcommand"
 assert_contains "$output" "status" "Lists 'status' subcommand"
 assert_contains "$output" "clean" "Lists 'clean' subcommand"
+assert_contains "$output" "check-kata" "Lists 'check-kata' subcommand"
 assert_contains "$output" "backup-auth" "Lists 'backup-auth' subcommand"
 assert_contains "$output" "reset-auth" "Lists 'reset-auth' subcommand"
 assert_contains "$output" "uninstall" "Lists 'uninstall' subcommand"
+assert_contains "$output" "--kata" "Lists '--kata' argument"
+assert_contains "$output" "KATA_RUNTIME" "Lists 'KATA_RUNTIME' config"
 
 test_case "aiab -h works as shorthand for --help"
 output=$("${AIAB_BIN}" -h 2>&1)
@@ -247,6 +250,69 @@ EOF
 
 clean_output=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" clean 2>&1)
 assert_contains "$clean_output" "Cleanup finished!" "aiab clean executes cleanup flow"
+
+# ------------------------------------------------------------
+# Test 10: Kata Containers & Hypervisor Integration
+# ------------------------------------------------------------
+test_case "aiab check-kata runs diagnostic check"
+check_kata_out=$(PATH="${MOCK_BIN}:${PATH}" "${AIAB_BIN}" check-kata 2>&1 || true)
+assert_contains "$check_kata_out" "Kata Containers & KVM Hypervisor Diagnostic" "check-kata prints diagnostic header"
+assert_contains "$check_kata_out" "Checking hardware virtualization" "check-kata checks KVM device"
+assert_contains "$check_kata_out" "Checking Kata Containers installation" "check-kata checks Kata binaries"
+
+test_case "aiab status outputs hypervisor isolation section"
+cat << 'EOF' > "${MOCK_BIN}/docker"
+#!/usr/bin/env bash
+if [ "${1:-}" = "info" ]; then exit 0; fi
+if [ "${1:-}" = "images" ]; then echo "IMAGE_LINE"; exit 0; fi
+if [ "${1:-}" = "volume" ]; then echo "VOLUME_LINE"; exit 0; fi
+if [ "${1:-}" = "run" ]; then echo "v1.0.0"; exit 0; fi
+exit 0
+EOF
+status_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" status 2>&1)
+assert_contains "$status_out" "Hypervisor Isolation (Kata Containers)" "status reports Hypervisor isolation section"
+
+test_case "aiab --kata rejects execution when KVM is missing"
+no_kvm_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${TEST_SANDBOX}/nonexistent_kvm" "${AIAB_BIN}" --kata 2>&1 || true)
+assert_contains "$no_kvm_out" "Hardware virtualization is required for Kata Containers" "Reports error on missing KVM"
+
+test_case "aiab --kata passes --runtime=kata-runtime and does not forward --kata to agy"
+cat << 'EOF' > "${MOCK_BIN}/docker"
+#!/usr/bin/env bash
+if [ "${1:-}" = "info" ]; then exit 0; fi
+if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then exit 0; fi
+if [ "${1:-}" = "volume" ]; then exit 0; fi
+if [ "${1:-}" = "run" ]; then
+    echo "MOCK_DOCKER_RUN: $@"
+    exit 0
+fi
+exit 0
+EOF
+MOCK_KVM="${TEST_SANDBOX}/mock_kvm"
+touch "${MOCK_KVM}"
+chmod 666 "${MOCK_KVM}"
+
+kata_run_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --kata --continue 2>&1)
+assert_contains "$kata_run_out" "--runtime=kata-runtime" "Appends --runtime=kata-runtime to container run"
+assert_contains "$kata_run_out" "Hypervisor Isolation: Kata Containers microVM active" "Displays hypervisor announcement banner"
+assert_contains "$kata_run_out" "--continue" "Forwards target arguments"
+
+run_cmd_line=$(echo "$kata_run_out" | grep "MOCK_DOCKER_RUN:" || true)
+if echo "$run_cmd_line" | grep -q "agy-yolo:latest.*--kata"; then
+    echo -e "  ${RED}✗ FAIL:${NC} --kata was forwarded to agy inside container"
+    FAILED=$((FAILED + 1))
+else
+    echo -e "  ${GREEN}✓ PASS:${NC} --kata flag is filtered out of inner container arguments"
+    PASSED=$((PASSED + 1))
+fi
+
+test_case "aiab supports AIAB_KATA=1 environment variable"
+env_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker AIAB_KATA=1 KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
+assert_contains "$env_kata_out" "--runtime=kata-runtime" "AIAB_KATA=1 appends --runtime=kata-runtime"
+
+test_case "aiab --hypervisor works as alias for --kata"
+alias_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --hypervisor 2>&1)
+assert_contains "$alias_kata_out" "--runtime=kata-runtime" "--hypervisor flag enables Kata microVM runtime"
 
 # Clean up sandbox
 rm -rf "${TEST_SANDBOX}"
