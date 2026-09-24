@@ -121,7 +121,7 @@ aiab . bash
 ```
 
 ### Hardware Hypervisor Isolation (Kata Containers)
-By default, **`aiab` automatically defaults to Kata Containers microVM isolation whenever Kata and `/dev/kvm` are detected on your host!** If Kata is not installed, it falls back seamlessly to standard container mode.
+By default, **`aiab` automatically defaults to Kata Containers microVM isolation whenever Kata and `/dev/kvm` are detected on your host!** *(Note: Kata microVM isolation runs on Docker via containerd shimv2; Podman runs with standard container isolation).* If Kata is not installed, `aiab` falls back seamlessly to standard container mode.
 
 You can also explicitly control this behavior via flags or config:
 
@@ -167,6 +167,21 @@ flowchart TD
 2. **Exploit Containment:** Even if an autonomous agent runs malicious code that attempts a Linux kernel exploit or `setuid` privilege escalation, the exploit only compromises the temporary microVM guest kernel—leaving your host system and personal files completely untouched.
 3. **Virtio-FS Performance:** Project workspace files are shared into the microVM using `virtio-fs` for near-native read/write speeds.
 
+> [!IMPORTANT]
+> **Container Engine Compatibility: Docker Required for Kata MicroVMs**
+> - **Docker** is fully compatible with Kata Containers via its containerd `shimv2` protocol (`io.containerd.kata.v2`).
+> - **Podman is incompatible with Kata Containers.** The Podman CLI expects legacy direct OCI command verbs (`create`/`delete`), which modern Kata Containers does not support. Attempting to run Kata under Podman fails with:
+>   ```text
+>   Error: OCI runtime error: /usr/local/bin/kata-runtime: Invalid command "create"
+>   ```
+> - If you use **Podman**, run `aiab` with standard container isolation:
+>   ```bash
+>   aiab --no-kata
+>   # Or set standard isolation as default:
+>   aiab config set AIAB_KATA 0
+>   ```
+> - If both engines are installed, `aiab` automatically routes Kata microVM executions to Docker whenever Docker is running, or you can set Docker as preferred: `aiab config set CONTAINER_RUNTIME docker`.
+
 ### Host Setup & Verification
 Run the built-in diagnostic tool to verify host hardware virtualization and Kata runtime status:
 
@@ -189,24 +204,26 @@ newgrp kvm
 
 #### Manual Installation (Alternative):
 If you prefer installing manually:
-1. Download the latest `kata-static-<version>-x86_64.tar.xz` release from [Kata Containers GitHub Releases](https://github.com/kata-containers/kata-containers/releases).
+1. Download the latest `kata-static-<version>-amd64.tar.xz` release from [Kata Containers GitHub Releases](https://github.com/kata-containers/kata-containers/releases).
 2. Extract to `/`: `sudo tar -xJf kata-static-*.tar.xz -C /` (installs to `/opt/kata`).
 3. Symlink binaries:
    ```bash
    sudo ln -sf /opt/kata/bin/kata-runtime /usr/local/bin/kata-runtime
    sudo ln -sf /opt/kata/bin/kata-ctl /usr/local/bin/kata-ctl
+   sudo ln -sf /opt/kata/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
    ```
-4. If using Docker, add the runtime to `/etc/docker/daemon.json`:
+4. If using Docker, register the runtime in `/etc/docker/daemon.json`:
    ```json
    {
      "runtimes": {
        "kata-runtime": {
-         "path": "/usr/local/bin/kata-runtime"
+         "path": "/usr/local/bin/containerd-shim-kata-v2",
+         "runtimeType": "io.containerd.kata.v2"
        }
      }
    }
    ```
-   Then reload Docker: `sudo systemctl restart docker`. (Podman automatically detects and uses `/opt/kata/bin/kata-runtime` or `/usr/local/bin/kata-runtime` without modifying daemon configs).
+   Then reload Docker: `sudo systemctl restart docker`.
 5. Load and persist the kernel acceleration modules (`vhost`, `vhost_net`, `vhost_vsock`):
    ```bash
    sudo modprobe vhost vhost_net vhost_vsock
