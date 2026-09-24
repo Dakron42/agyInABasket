@@ -26,7 +26,7 @@ BASKET_TAG="${BASKET_TAG:-agy-basket:latest}"
 AGY_DATA_VOLUME="${AGY_DATA_VOLUME:-agy-data}"
 AGY_CONFIG_VOLUME="${AGY_CONFIG_VOLUME:-agy-config}"
 CONTAINER_RUNTIME=""
-AIAB_KATA=0
+AIAB_KATA="auto"
 AIAB_HYPERVISOR=""
 KATA_RUNTIME="kata-runtime"
 KVM_DEVICE="/dev/kvm"
@@ -67,8 +67,8 @@ save_config() {
 # agyInABasket (aiab) Configuration File
 # Automatically managed by 'aiab config'. You can also edit this file manually.
 
-# Enable Kata Containers KVM microVM isolation by default (1 = enabled, 0 = disabled)
-AIAB_KATA="${AIAB_KATA:-0}"
+# Enable Kata Containers KVM microVM isolation ('auto' = default if installed, '1' = force on, '0' = force off)
+AIAB_KATA="${AIAB_KATA:-auto}"
 
 # Preferred container engine ('auto', 'podman', or 'docker')
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-auto}"
@@ -82,6 +82,16 @@ DEFAULT_MODEL="${DEFAULT_MODEL:-}"
 # Default reasoning effort forwarded to agy (empty, 'low', 'medium', 'high')
 DEFAULT_EFFORT="${DEFAULT_EFFORT:-}"
 EOF
+}
+
+# Check if Kata Containers and hardware KVM are available on the host
+is_kata_available() {
+    if [ -e "${KVM_DEVICE}" ] && [ -r "${KVM_DEVICE}" ] && [ -w "${KVM_DEVICE}" ]; then
+        if command -v "${KATA_RUNTIME}" >/dev/null 2>&1 || [ -x "${KATA_RUNTIME}" ] || command -v kata-runtime >/dev/null 2>&1 || [ -x "/usr/bin/kata-runtime" ]; then
+            return 0
+        fi
+    fi
+    return 1
 }
 
 # Load saved configuration
@@ -281,6 +291,17 @@ cmd_status() {
     else
         echo "Kata Runtime: Not installed (run 'aiab check-kata' for install details)"
     fi
+    if [ "${AIAB_KATA}" = "1" ]; then
+        echo "Isolation Mode: Force Kata MicroVM (configured)"
+    elif [ "${AIAB_KATA}" = "0" ]; then
+        echo "Isolation Mode: Standard Container (configured)"
+    else
+        if is_kata_available; then
+            echo "Isolation Mode: Auto (active: Kata MicroVM)"
+        else
+            echo "Isolation Mode: Auto (active: Standard Container)"
+        fi
+    fi
     echo ""
     echo "--- agy CLI Version (inside container) ---"
     "$CONTAINER_RUNTIME" run --rm "${AGY_IMAGE}" agy changelog 2>/dev/null | head -n 10 || echo "Version check unavailable."
@@ -389,9 +410,17 @@ interactive_config_menu() {
         echo "=========================================================="
         echo "Config file: ${AIAB_CONFIG_FILE}"
         echo ""
-        local kata_label="[Disabled]"
-        if [ "${AIAB_KATA:-0}" = "1" ]; then
-            kata_label="[Enabled (KVM MicroVM)]"
+        local kata_label="[Auto: Disabled (Kata not detected)]"
+        if [ "${AIAB_KATA}" = "1" ]; then
+            kata_label="[Always Enabled (KVM MicroVM)]"
+        elif [ "${AIAB_KATA}" = "0" ]; then
+            kata_label="[Always Disabled (Standard Container)]"
+        else
+            if is_kata_available; then
+                kata_label="[Auto: Enabled (Kata microVM detected)]"
+            else
+                kata_label="[Auto: Disabled (Kata not detected)]"
+            fi
         fi
         local engine_label="${CONTAINER_RUNTIME:-auto}"
         local model_label="${DEFAULT_MODEL:-<none>}"
@@ -410,13 +439,18 @@ interactive_config_menu() {
 
         case "$choice" in
             1)
-                if [ "${AIAB_KATA:-0}" = "1" ]; then
-                    AIAB_KATA=0
-                    echo "✓ Hypervisor isolation disabled (standard container)."
-                else
-                    AIAB_KATA=1
-                    echo "✓ Hypervisor isolation enabled (Kata Containers microVM)."
-                fi
+                echo ""
+                echo "Select Hypervisor Isolation Mode:"
+                echo "  1) auto  - Enable Kata microVM automatically if installed, else standard container (Default)"
+                echo "  2) force - Always require Kata microVM (fails if missing)"
+                echo "  3) off   - Always run in standard container"
+                read -rp "Choice (1-3): " kata_choice
+                case "$kata_choice" in
+                    1) AIAB_KATA="auto"; echo "✓ Hypervisor isolation set to auto-detect." ;;
+                    2) AIAB_KATA="1"; echo "✓ Hypervisor isolation set to always enabled." ;;
+                    3) AIAB_KATA="0"; echo "✓ Hypervisor isolation set to always disabled." ;;
+                    *) echo "Invalid choice." ;;
+                esac
                 save_config
                 ;;
             2)
@@ -469,7 +503,7 @@ interactive_config_menu() {
             r|R)
                 read -rp "Are you sure you want to reset all settings to defaults? (y/N) " confirm_reset
                 if [[ "$confirm_reset" =~ ^[Yy]$ ]]; then
-                    AIAB_KATA=0
+                    AIAB_KATA="auto"
                     CONTAINER_RUNTIME="auto"
                     KATA_RUNTIME="kata-runtime"
                     DEFAULT_MODEL=""
@@ -499,11 +533,19 @@ cmd_config() {
             echo "=== agyInABasket Configuration ==="
             echo "Config file: ${AIAB_CONFIG_FILE}"
             echo ""
-            local kata_desc="[Disabled]"
-            if [ "${AIAB_KATA:-0}" = "1" ]; then
-                kata_desc="[Enabled (KVM MicroVM)]"
+            local kata_desc="[Auto-detect]"
+            if [ "${AIAB_KATA}" = "1" ]; then
+                kata_desc="[Always Enabled (KVM MicroVM)]"
+            elif [ "${AIAB_KATA}" = "0" ]; then
+                kata_desc="[Always Disabled (Standard Container)]"
+            else
+                if is_kata_available; then
+                    kata_desc="[Auto: Enabled (Kata microVM detected)]"
+                else
+                    kata_desc="[Auto: Disabled (Kata not detected)]"
+                fi
             fi
-            echo "  AIAB_KATA:         ${AIAB_KATA:-0} ${kata_desc}"
+            echo "  AIAB_KATA:         ${AIAB_KATA:-auto} ${kata_desc}"
             echo "  CONTAINER_RUNTIME: ${CONTAINER_RUNTIME:-auto}"
             echo "  KATA_RUNTIME:      ${KATA_RUNTIME:-kata-runtime}"
             echo "  DEFAULT_MODEL:     ${DEFAULT_MODEL:-<none>}"
@@ -518,7 +560,7 @@ cmd_config() {
                 return 1
             fi
             case "$key" in
-                AIAB_KATA)          echo "${AIAB_KATA:-0}" ;;
+                AIAB_KATA)          echo "${AIAB_KATA:-auto}" ;;
                 CONTAINER_RUNTIME)  echo "${CONTAINER_RUNTIME:-auto}" ;;
                 KATA_RUNTIME)       echo "${KATA_RUNTIME:-kata-runtime}" ;;
                 DEFAULT_MODEL)      echo "${DEFAULT_MODEL:-}" ;;
@@ -536,8 +578,8 @@ cmd_config() {
             fi
             case "$key" in
                 AIAB_KATA)
-                    if [ "$val" != "0" ] && [ "$val" != "1" ]; then
-                        echo "❌ Error: AIAB_KATA must be 0 (disabled) or 1 (enabled)." >&2
+                    if [ "$val" != "0" ] && [ "$val" != "1" ] && [ "$val" != "auto" ]; then
+                        echo "❌ Error: AIAB_KATA must be 'auto', '1' (always enable), or '0' (always disable)." >&2
                         return 1
                     fi
                     AIAB_KATA="$val"
@@ -568,7 +610,7 @@ cmd_config() {
             return 0
             ;;
         reset)
-            AIAB_KATA=0
+            AIAB_KATA="auto"
             CONTAINER_RUNTIME="auto"
             KATA_RUNTIME="kata-runtime"
             DEFAULT_MODEL=""
@@ -675,10 +717,12 @@ esac
 check_runtime
 
 # Initialize Kata configuration from environment / config file
-USE_KATA="${AIAB_KATA:-0}"
+KATA_MODE="${AIAB_KATA:-auto}"
 if [ "${AIAB_HYPERVISOR:-}" = "kata" ]; then
-    USE_KATA=1
+    KATA_MODE="1"
 fi
+
+CLI_KATA_OVERRIDE=""
 
 # Parse arguments: extract target directory, --kata / --hypervisor flags, and forwarded options
 RAW_ARGS=("$@")
@@ -688,9 +732,9 @@ TARGET_DIR_SET=false
 
 for arg in "${RAW_ARGS[@]}"; do
     if [ "$arg" = "--kata" ] || [ "$arg" = "--hypervisor" ]; then
-        USE_KATA=1
+        CLI_KATA_OVERRIDE="1"
     elif [ "$arg" = "--no-kata" ] || [ "$arg" = "--no-hypervisor" ]; then
-        USE_KATA=0
+        CLI_KATA_OVERRIDE="0"
     elif [ "$TARGET_DIR_SET" = false ] && [ -d "$arg" ]; then
         TARGET_DIR="$arg"
         TARGET_DIR_SET=true
@@ -705,6 +749,23 @@ for arg in "${RAW_ARGS[@]}"; do
         FILTERED_ARGS+=("$arg")
     fi
 done
+
+# Resolve USE_KATA
+USE_KATA=0
+if [ -n "$CLI_KATA_OVERRIDE" ]; then
+    USE_KATA="$CLI_KATA_OVERRIDE"
+elif [ "$KATA_MODE" = "1" ]; then
+    USE_KATA=1
+elif [ "$KATA_MODE" = "0" ]; then
+    USE_KATA=0
+else
+    # Auto-detection mode (default): default to Kata if installed and KVM is accessible
+    if is_kata_available; then
+        USE_KATA=1
+    else
+        USE_KATA=0
+    fi
+fi
 
 TARGET_DIR="$(realpath "$TARGET_DIR")"
 

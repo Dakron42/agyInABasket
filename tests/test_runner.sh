@@ -370,12 +370,40 @@ test_case "aiab config reset restores defaults"
 AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config reset >/dev/null
 reset_kata=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config get AIAB_KATA)
 reset_model=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config get DEFAULT_MODEL)
-if [ "$reset_kata" = "0" ] && [ -z "$reset_model" ]; then
-    echo -e "  ${GREEN}✓ PASS:${NC} Configuration was reset to defaults"
+if [ "$reset_kata" = "auto" ] && [ -z "$reset_model" ]; then
+    echo -e "  ${GREEN}✓ PASS:${NC} Configuration was reset to defaults (AIAB_KATA=auto)"
     PASSED=$((PASSED + 1))
 else
     echo -e "  ${RED}✗ FAIL:${NC} Reset failed (AIAB_KATA=$reset_kata, DEFAULT_MODEL=$reset_model)"
     FAILED=$((FAILED + 1))
+fi
+
+# ------------------------------------------------------------
+# Test 12: Defaulting to Kata when installed
+# ------------------------------------------------------------
+test_case "aiab defaults to Kata microVM when installed and AIAB_KATA is auto"
+# Create mock kata-runtime executable in PATH
+cat << 'EOF' > "${MOCK_BIN}/kata-runtime"
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/kata-runtime"
+
+# With kata-runtime in PATH and MOCK_KVM present, default run should use Kata
+auto_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
+assert_contains "$auto_kata_out" "--runtime=kata-runtime" "Auto-detected Kata and enabled microVM by default"
+assert_contains "$auto_kata_out" "Hypervisor Isolation: Kata Containers microVM active" "Auto-announced microVM banner"
+
+test_case "aiab falls back to standard container when Kata is not installed and AIAB_KATA is auto"
+# Remove mock kata-runtime
+rm -f "${MOCK_BIN}/kata-runtime"
+fallback_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
+if echo "$fallback_out" | grep -q -- "--runtime=kata-runtime"; then
+    echo -e "  ${RED}✗ FAIL:${NC} Erroneously enabled Kata runtime when kata-runtime was missing"
+    FAILED=$((FAILED + 1))
+else
+    echo -e "  ${GREEN}✓ PASS:${NC} Gracefully fell back to standard container when kata-runtime was missing"
+    PASSED=$((PASSED + 1))
 fi
 
 # Clean up sandbox

@@ -121,17 +121,19 @@ aiab . bash
 ```
 
 ### Hardware Hypervisor Isolation (Kata Containers)
-Run Antigravity enclosed inside a dedicated **KVM microVM** using Kata Containers:
+By default, **`aiab` automatically defaults to Kata Containers microVM isolation whenever Kata and `/dev/kvm` are detected on your host!** If Kata is not installed, it falls back seamlessly to standard container mode.
+
+You can also explicitly control this behavior via flags or config:
 
 ```bash
-# Launch current directory with hardware microVM isolation
+# Force hardware microVM isolation
 aiab --kata
+
+# Force standard container execution (bypasses Kata microVM for this run)
+aiab --no-kata
 
 # Specify project directory and Kata microVM
 aiab ~/code/my-web-app --kata
-
-# Or enable hypervisor isolation permanently by adding to ~/.bashrc:
-export AIAB_KATA=1
 ```
 
 ---
@@ -276,10 +278,13 @@ You can also view and edit settings programmatically:
 # View all current settings
 aiab config show
 
-# Enable Kata Containers microVM isolation by default
+# Set Kata microVM to auto-detect (Default: uses Kata if installed)
+aiab config set AIAB_KATA auto
+
+# Always require Kata microVM (fails if KVM/Kata missing)
 aiab config set AIAB_KATA 1
 
-# Disable Kata microVM by default
+# Always use standard container (bypasses Kata)
 aiab config set AIAB_KATA 0
 
 # Set default container engine to podman or docker
