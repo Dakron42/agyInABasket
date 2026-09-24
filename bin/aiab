@@ -355,8 +355,28 @@ cmd_check_kata() {
     fi
     echo ""
 
-    # 2. Check Kata runtime binary
-    echo "2. Checking Kata Containers installation..."
+    # 2. Check kernel acceleration modules
+    echo "2. Checking kernel acceleration modules (vhost, vhost_net, vhost_vsock)..."
+    local missing_mods=()
+    local kmod
+    for kmod in vhost vhost_net vhost_vsock; do
+        if [ -f /proc/modules ] && ! grep -qw "$kmod" /proc/modules 2>/dev/null; then
+            missing_mods+=("$kmod")
+        fi
+    done
+    if [ "${#missing_mods[@]}" -eq 0 ]; then
+        echo "   ✓ Acceleration kernel modules are loaded (vhost, vhost_net, vhost_vsock)."
+    else
+        echo "   ⚠️ Missing loaded kernel modules: ${missing_mods[*]}"
+        echo "      To load them now:"
+        echo "        sudo modprobe ${missing_mods[*]}"
+        echo "      To load them automatically on boot:"
+        echo "        echo -e '${missing_mods[*]}' | tr ' ' '\n' | sudo tee -a /etc/modules-load.d/kata.conf"
+    fi
+    echo ""
+
+    # 3. Check Kata runtime binary
+    echo "3. Checking Kata Containers installation..."
     local kata_bin=""
     kata_bin="$(find_kata_binary 2>/dev/null || true)"
 
@@ -377,8 +397,8 @@ cmd_check_kata() {
     fi
     echo ""
 
-    # 3. Check Container runtime integration
-    echo "3. Checking container runtime configuration..."
+    # 4. Check Container runtime integration
+    echo "4. Checking container runtime configuration..."
     local runtime_found=""
     if [ -n "$CONTAINER_RUNTIME" ] && command -v "$CONTAINER_RUNTIME" >/dev/null 2>&1; then
         runtime_found="$CONTAINER_RUNTIME"

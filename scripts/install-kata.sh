@@ -27,20 +27,41 @@ case "$ARCH" in
         ;;
 esac
 
-# 2. Hardware virtualization check
+# 2. Hardware virtualization and kernel modules check
 echo "🔍 Checking hardware virtualization (VT-x / AMD-V)..."
 if [ ! -e "/dev/kvm" ]; then
     echo "⚠️ Warning: /dev/kvm device node was not found."
     if grep -E -q '(vmx|svm)' /proc/cpuinfo 2>/dev/null; then
-        echo "   CPU supports virtualization! You may need to load the kvm module:"
-        echo "     sudo modprobe kvm"
-        echo "     sudo modprobe kvm_intel  # or kvm_amd"
+        echo "   CPU supports virtualization! Attempting to load KVM kernel modules..."
+        sudo modprobe kvm 2>/dev/null || true
+        sudo modprobe kvm_intel 2>/dev/null || sudo modprobe kvm_amd 2>/dev/null || true
     else
         echo "   ❌ Your CPU does not appear to support hardware virtualization or it is disabled in BIOS/UEFI." >&2
         echo "   Please enable Intel VT-x or AMD-V in your BIOS/UEFI settings." >&2
     fi
 else
     echo "✓ Hardware virtualization (/dev/kvm) detected."
+fi
+
+# Load required kernel modules for Kata Containers (vhost, vhost_net, vhost_vsock)
+echo "🔌 Loading required host kernel modules (vhost, vhost_net, vhost_vsock)..."
+for mod in vhost vhost_net vhost_vsock; do
+    if sudo modprobe "$mod" 2>/dev/null; then
+        echo "   ✓ Loaded module: $mod"
+    else
+        echo "   ⚠️ Notice: Unable to load module '$mod' (it may be built-in or require kernel headers)"
+    fi
+done
+
+# Persist kernel modules on boot via /etc/modules-load.d/kata.conf
+if [ -d "/etc/modules-load.d" ]; then
+    cat << 'EOF' | sudo tee /etc/modules-load.d/kata.conf >/dev/null
+# Kernel modules required for Kata Containers hypervisor isolation
+vhost
+vhost_net
+vhost_vsock
+EOF
+    echo "✓ Configured /etc/modules-load.d/kata.conf for persistent module loading across reboots."
 fi
 
 # Ensure user is in kvm group if group exists

@@ -207,7 +207,12 @@ If you prefer installing manually:
    }
    ```
    Then reload Docker: `sudo systemctl restart docker`. (Podman automatically detects and uses `/opt/kata/bin/kata-runtime` or `/usr/local/bin/kata-runtime` without modifying daemon configs).
-5. Add your user to the `kvm` group: `sudo usermod -aG kvm $USER && newgrp kvm`.
+5. Load and persist the kernel acceleration modules (`vhost`, `vhost_net`, `vhost_vsock`):
+   ```bash
+   sudo modprobe vhost vhost_net vhost_vsock
+   echo -e "vhost\nvhost_net\nvhost_vsock" | sudo tee /etc/modules-load.d/kata.conf
+   ```
+6. Add your user to the `kvm` group: `sudo usermod -aG kvm $USER && newgrp kvm`.
 
 ---
 
