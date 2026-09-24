@@ -91,13 +91,12 @@ echo ""
 echo "🛡️ Hypervisor Isolation Check (Kata Containers):"
 if [ -e "/dev/kvm" ]; then
     echo "✓ Hardware virtualization (/dev/kvm) detected on host."
-    if command -v kata-runtime >/dev/null 2>&1 || [ -x "/usr/bin/kata-runtime" ]; then
-        echo "✓ Kata Containers runtime detected! You can launch with microVM isolation using:"
-        echo "    aiab --kata"
+    if command -v kata-runtime >/dev/null 2>&1 || [ -x "/opt/kata/bin/kata-runtime" ] || [ -x "/usr/local/bin/kata-runtime" ] || [ -x "/usr/bin/kata-runtime" ]; then
+        echo "✓ Kata Containers runtime detected! aiab will automatically default to microVM isolation."
     else
         echo "ℹ️ Kata Containers is not installed. Standard container isolation will be used."
-        echo "  To enable hardware microVM isolation on Ubuntu/Debian:"
-        echo "    sudo apt-get update && sudo apt-get install -y kata-containers"
+        echo "  To install Kata Containers on Linux Mint / Ubuntu, run:"
+        echo "    ./scripts/install-kata.sh"
     fi
 else
     echo "ℹ️ /dev/kvm device not found. Standard container isolation will be used."

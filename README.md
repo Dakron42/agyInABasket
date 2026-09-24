@@ -174,28 +174,40 @@ Run the built-in diagnostic tool to verify host hardware virtualization and Kata
 aiab check-kata
 ```
 
-#### Installing Kata Containers on Ubuntu / Debian:
-```bash
-sudo apt-get update
-sudo apt-get install -y kata-containers
+#### Installing Kata Containers (Linux Mint, Ubuntu, Debian):
+Kata Containers upstream distributes pre-compiled static releases (`kata-static-*.tar.xz`) that bundle QEMU, Cloud-Hypervisor, rootfs, and `kata-runtime`.
 
-# Ensure your host user has access to /dev/kvm:
-sudo usermod -aG kvm $USER
+`aiab` provides a one-step installer script that automates KVM checks, static release extraction to `/opt/kata`, symlink creation in `/usr/local/bin`, and Docker daemon configuration:
+
+```bash
+# Run the automated Kata installer:
+./scripts/install-kata.sh
+
+# Ensure changes take effect in your current shell:
 newgrp kvm
 ```
 
-#### Configuring Docker (if using Docker runtime):
-Register the Kata runtime in `/etc/docker/daemon.json`:
-```json
-{
-  "runtimes": {
-    "kata-runtime": {
-      "path": "/usr/bin/kata-runtime"
-    }
-  }
-}
-```
-Then restart Docker: `sudo systemctl restart docker`. (Podman detects and uses Kata directly).
+#### Manual Installation (Alternative):
+If you prefer installing manually:
+1. Download the latest `kata-static-<version>-x86_64.tar.xz` release from [Kata Containers GitHub Releases](https://github.com/kata-containers/kata-containers/releases).
+2. Extract to `/`: `sudo tar -xJf kata-static-*.tar.xz -C /` (installs to `/opt/kata`).
+3. Symlink binaries:
+   ```bash
+   sudo ln -sf /opt/kata/bin/kata-runtime /usr/local/bin/kata-runtime
+   sudo ln -sf /opt/kata/bin/kata-ctl /usr/local/bin/kata-ctl
+   ```
+4. If using Docker, add the runtime to `/etc/docker/daemon.json`:
+   ```json
+   {
+     "runtimes": {
+       "kata-runtime": {
+         "path": "/usr/local/bin/kata-runtime"
+       }
+     }
+   }
+   ```
+   Then reload Docker: `sudo systemctl restart docker`. (Podman automatically detects and uses `/opt/kata/bin/kata-runtime` or `/usr/local/bin/kata-runtime` without modifying daemon configs).
+5. Add your user to the `kvm` group: `sudo usermod -aG kvm $USER && newgrp kvm`.
 
 ---
 

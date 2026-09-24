@@ -84,10 +84,34 @@ DEFAULT_EFFORT="${DEFAULT_EFFORT:-}"
 EOF
 }
 
+# Locate Kata runtime binary across PATH and standard installation paths (/opt/kata, /usr/local/bin, /usr/bin)
+find_kata_binary() {
+    if [ -n "${KATA_RUNTIME}" ] && command -v "${KATA_RUNTIME}" >/dev/null 2>&1; then
+        command -v "${KATA_RUNTIME}"
+        return 0
+    elif [ -n "${KATA_RUNTIME}" ] && [ -x "${KATA_RUNTIME}" ]; then
+        echo "${KATA_RUNTIME}"
+        return 0
+    fi
+
+    local standard_path
+    for standard_path in \
+        "$(command -v kata-runtime 2>/dev/null || true)" \
+        "/opt/kata/bin/kata-runtime" \
+        "/usr/local/bin/kata-runtime" \
+        "/usr/bin/kata-runtime"; do
+        if [ -n "$standard_path" ] && [ -x "$standard_path" ]; then
+            echo "$standard_path"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Check if Kata Containers and hardware KVM are available on the host
 is_kata_available() {
     if [ -e "${KVM_DEVICE}" ] && [ -r "${KVM_DEVICE}" ] && [ -w "${KVM_DEVICE}" ]; then
-        if command -v "${KATA_RUNTIME}" >/dev/null 2>&1 || [ -x "${KATA_RUNTIME}" ] || command -v kata-runtime >/dev/null 2>&1 || [ -x "/usr/bin/kata-runtime" ]; then
+        if find_kata_binary >/dev/null 2>&1; then
             return 0
         fi
     fi
@@ -284,10 +308,9 @@ cmd_status() {
     else
         echo "Hardware KVM: Not detected (enable virtualization in BIOS/UEFI)"
     fi
-    if command -v kata-runtime >/dev/null 2>&1; then
-        echo "Kata Runtime: Installed ($(command -v kata-runtime))"
-    elif [ -x "/usr/bin/kata-runtime" ]; then
-        echo "Kata Runtime: Installed (/usr/bin/kata-runtime)"
+    local kata_bin_status
+    if kata_bin_status="$(find_kata_binary 2>/dev/null)" && [ -n "$kata_bin_status" ]; then
+        echo "Kata Runtime: Installed (${kata_bin_status})"
     else
         echo "Kata Runtime: Not installed (run 'aiab check-kata' for install details)"
     fi
@@ -335,11 +358,7 @@ cmd_check_kata() {
     # 2. Check Kata runtime binary
     echo "2. Checking Kata Containers installation..."
     local kata_bin=""
-    if command -v kata-runtime >/dev/null 2>&1; then
-        kata_bin="$(command -v kata-runtime)"
-    elif [ -x "/usr/bin/kata-runtime" ]; then
-        kata_bin="/usr/bin/kata-runtime"
-    fi
+    kata_bin="$(find_kata_binary 2>/dev/null || true)"
 
     if [ -n "$kata_bin" ]; then
         echo "   ✓ kata-runtime found at: $kata_bin"
@@ -350,9 +369,10 @@ cmd_check_kata() {
         fi
     else
         echo "   ❌ kata-runtime is not installed on the host."
-        echo "      To install Kata Containers on Ubuntu/Debian:"
-        echo "        sudo apt-get update && sudo apt-get install -y kata-containers"
-        echo "      Or visit: https://github.com/kata-containers/kata-containers"
+        echo "      To install Kata Containers on Linux Mint / Ubuntu:"
+        echo "        Run the automated installer: ./scripts/install-kata.sh"
+        echo "        Or install the official static release tarball into /opt/kata:"
+        echo "        https://github.com/kata-containers/kata-containers/releases"
         all_good=false
     fi
     echo ""
@@ -818,8 +838,9 @@ if [ "$USE_KATA" = "1" ]; then
     fi
 
     local_kata_target="${KATA_RUNTIME}"
-    if [ "$CONTAINER_RUNTIME" = "podman" ] && [ -x "/usr/bin/kata-runtime" ] && [ "${KATA_RUNTIME}" = "kata-runtime" ]; then
-        local_kata_target="/usr/bin/kata-runtime"
+    detected_kata_bin="$(find_kata_binary 2>/dev/null || true)"
+    if [ "$CONTAINER_RUNTIME" = "podman" ] && [ -n "$detected_kata_bin" ] && [ "${KATA_RUNTIME}" = "kata-runtime" ]; then
+        local_kata_target="$detected_kata_bin"
     fi
     RUN_FLAGS+=("--runtime=${local_kata_target}")
 fi

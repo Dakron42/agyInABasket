@@ -9,6 +9,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AIAB_BIN="${REPO_DIR}/bin/aiab"
 ENTRYPOINT="${REPO_DIR}/entrypoint.sh"
 INSTALL_SH="${REPO_DIR}/scripts/install.sh"
+INSTALL_KATA_SH="${REPO_DIR}/scripts/install-kata.sh"
 AIAB_BASH="${REPO_DIR}/shell/aiab.bash"
 
 PASSED=0
@@ -75,12 +76,13 @@ test_case "Syntax checking bash scripts"
 bash -n "${AIAB_BIN}" && \
 bash -n "${ENTRYPOINT}" && \
 bash -n "${INSTALL_SH}" && \
+bash -n "${INSTALL_KATA_SH}" && \
 bash -n "${AIAB_BASH}"
 assert_success $? "All bash scripts pass 'bash -n' syntax verification"
 
 test_case "Permissions check"
-[ -x "${AIAB_BIN}" ] && [ -x "${ENTRYPOINT}" ] && [ -x "${INSTALL_SH}" ]
-assert_success $? "bin/aiab, entrypoint.sh, and scripts/install.sh are executable"
+[ -x "${AIAB_BIN}" ] && [ -x "${ENTRYPOINT}" ] && [ -x "${INSTALL_SH}" ] && [ -x "${INSTALL_KATA_SH}" ]
+assert_success $? "bin/aiab, entrypoint.sh, scripts/install.sh, and scripts/install-kata.sh are executable"
 
 # ------------------------------------------------------------
 # Test 2: Help message output and subcommands listing
@@ -405,6 +407,18 @@ else
     echo -e "  ${GREEN}✓ PASS:${NC} Gracefully fell back to standard container when kata-runtime was missing"
     PASSED=$((PASSED + 1))
 fi
+
+test_case "aiab detects Kata binary in /opt/kata/bin/kata-runtime"
+OPT_KATA_DIR="${TEST_SANDBOX}/opt/kata/bin"
+mkdir -p "${OPT_KATA_DIR}"
+cat << 'EOF' > "${OPT_KATA_DIR}/kata-runtime"
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "${OPT_KATA_DIR}/kata-runtime"
+
+opt_kata_out=$(PATH="${OPT_KATA_DIR}:${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
+assert_contains "$opt_kata_out" "--runtime=kata-runtime" "Auto-detected Kata static binary in /opt/kata/bin"
 
 # Clean up sandbox
 rm -rf "${TEST_SANDBOX}"
