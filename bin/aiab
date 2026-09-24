@@ -418,12 +418,20 @@ cmd_check_kata() {
                 echo "   ✓ Kata runtime is registered in Docker daemon."
             else
                 echo "   ℹ️ Docker is active. To register Kata runtime in Docker (/etc/docker/daemon.json):"
-                echo '      { "runtimes": { "kata-runtime": { "path": "/usr/bin/kata-runtime" } } }'
+                echo '      { "runtimes": { "kata-runtime": { "runtimeType": "io.containerd.kata.v2" } } }'
                 echo "      Then restart docker: sudo systemctl restart docker"
             fi
         elif [ "$runtime_found" = "podman" ]; then
-            echo "   ✓ Podman detected. Podman supports Kata directly via:"
-            echo "     --runtime=/usr/bin/kata-runtime or --runtime=kata-runtime"
+            echo "   ⚠️ Podman detected: Podman does NOT support Kata Containers."
+            echo "      Kata Containers requires containerd's shimv2 protocol, which is supported by Docker."
+            if command -v docker >/dev/null 2>&1; then
+                echo "      ✓ Docker is installed! aiab will route Kata microVM runs to Docker automatically,"
+                echo "        or you can set Docker as preferred: aiab config set CONTAINER_RUNTIME docker"
+            else
+                echo "      To run Kata microVMs, please install Docker: sudo apt-get install -y docker.io"
+                echo "      To run with Podman, use standard container isolation: aiab --no-kata"
+                all_good=false
+            fi
         fi
     fi
     echo ""
