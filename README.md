@@ -183,43 +183,64 @@ flowchart TD
 > - If both engines are installed, `aiab` automatically routes Kata microVM executions to Docker whenever Docker is running, or you can set Docker as preferred: `aiab config set CONTAINER_RUNTIME docker`.
 
 ### Host Setup & Verification
-Run the built-in diagnostic tool to verify host hardware virtualization and Kata runtime status:
+Run the built-in diagnostic tool to verify host hardware virtualization, kernel acceleration modules, and Kata runtime status:
 
 ```bash
 aiab check-kata
 ```
 
 #### Installing Kata Containers (Linux Mint, Ubuntu, Debian):
-Kata Containers upstream distributes pre-compiled static releases (`kata-static-*.tar.xz`) that bundle QEMU, Cloud-Hypervisor, rootfs, and `kata-runtime`.
+Kata Containers upstream distributes pre-compiled static releases (`kata-static-*.tar.zst`) that bundle QEMU, Cloud-Hypervisor, guest kernels, rootfs, and containerd shims.
 
-`aiab` provides a one-step installer script that automates KVM checks, static release extraction to `/opt/kata`, symlink creation in `/usr/local/bin`, and Docker daemon configuration:
+`aiab` provides a one-step installer script that automates KVM checks, kernel module loading, prior version cleanup, static release extraction to `/opt/kata`, and symlink creation in `/usr/local/bin`:
 
 ```bash
-# Run the automated Kata installer:
-./scripts/install-kata.sh
+# Run the automated Kata installer (defaults to 3.32.0+):
+sudo ./scripts/install-kata.sh
 
-# Ensure changes take effect in your current shell:
+# Ensure kvm group membership takes effect in your current shell:
 newgrp kvm
 ```
 
+> [!NOTE]
+> `install-kata.sh` defaults to **Kata Containers 3.32.0**. This release includes the upstream fix for Docker 29+ private time namespaces (PR #13082 / Issue #13080). It also cleans up any previous Kata installations in `/opt/kata` to avoid version conflicts.
+
 #### Manual Installation (Alternative):
 If you prefer installing manually:
-1. Download the latest `kata-static-<version>-amd64.tar.xz` release from [Kata Containers GitHub Releases](https://github.com/kata-containers/kata-containers/releases).
-2. Extract to `/`: `sudo tar -xJf kata-static-*.tar.xz -C /` (installs to `/opt/kata`).
+1. Download `kata-static-3.32.0-amd64.tar.zst` from [Kata Containers GitHub Releases](https://github.com/kata-containers/kata-containers/releases).
+2. Clean any prior version and extract to `/`:
+   ```bash
+   sudo rm -rf /opt/kata
+   sudo tar --zstd -xf kata-static-3.32.0-amd64.tar.zst -C /
+   ```
 3. Symlink binaries:
    ```bash
    sudo ln -sf /opt/kata/bin/kata-runtime /usr/local/bin/kata-runtime
    sudo ln -sf /opt/kata/bin/kata-ctl /usr/local/bin/kata-ctl
    sudo ln -sf /opt/kata/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
    ```
-4. Docker integration:
-   With `containerd-shim-kata-v2` symlinked to `/usr/local/bin`, Docker/containerd automatically discovers the runtime as `io.containerd.kata.v2` from your `$PATH` without requiring any changes to `/etc/docker/daemon.json`.
+4. **Zero-Config Docker Integration:**
+   With `containerd-shim-kata-v2` symlinked in `/usr/local/bin`, Docker/containerd automatically discovers the runtime as `io.containerd.kata.v2` directly from your `$PATH`. **No changes to `/etc/docker/daemon.json` are required.** (Modifying `daemon.json` with incompatible runtime keys can crash modern Docker daemons).
 5. Load and persist the kernel acceleration modules (`vhost`, `vhost_net`, `vhost_vsock`):
    ```bash
    sudo modprobe vhost vhost_net vhost_vsock
    echo -e "vhost\nvhost_net\nvhost_vsock" | sudo tee /etc/modules-load.d/kata.conf
    ```
-6. Add your user to the `kvm` group: `sudo usermod -aG kvm $USER && newgrp kvm`.
+6. Add your user to the `kvm` group:
+   ```bash
+   sudo usermod -aG kvm $USER
+   newgrp kvm
+   ```
+
+### 🩺 Troubleshooting Kata Containers
+
+| Error / Symptom | Root Cause | Solution |
+| :--- | :--- | :--- |
+| `Invalid command "create"` | **Podman incompatibility.** Modern Kata (3.x/4.x) implements containerd's `shimv2` protocol and no longer supports legacy direct OCI command verbs (`create`/`delete`). | Run via Docker: `CONTAINER_RUNTIME=docker aiab`<br>Or disable Kata when using Podman: `aiab --no-kata` |
+| `Internal: failed to create shim task: invalid namespace type` | **Docker 29+ time-namespace incompatibility with older Kata.** Docker 29.5+ injects a private Linux `time` namespace into container OCI specs by default. Kata versions prior to 3.32.0 reject this namespace. | Upgrade to Kata Containers **3.32.0+** by re-running: `sudo ./scripts/install-kata.sh` |
+| `Cannot connect to the Docker daemon at unix:///var/run/docker.sock` | **Docker daemon crash due to `/etc/docker/daemon.json`.** Modern Docker (v25+) rejects conflicting `path` and `runtimeType` definitions in `daemon.json`. | Remove or clean `/etc/docker/daemon.json`: `sudo rm -f /etc/docker/daemon.json && sudo systemctl restart docker`. Docker uses `$PATH` discovery for `io.containerd.kata.v2` automatically without `daemon.json`. |
+| `kernel property vhost_vsock not found` | Host kernel virtio acceleration modules are not loaded into the running Linux kernel. | Load and persist the modules:<br>`sudo modprobe vhost vhost_net vhost_vsock`<br>`echo -e "vhost\nvhost_net\nvhost_vsock" \| sudo tee /etc/modules-load.d/kata.conf` |
+| `Permission denied accessing /dev/kvm` | The current user is not a member of the `kvm` group, or group membership has not refreshed in the active shell. | Add user to group and refresh:<br>`sudo usermod -aG kvm $USER && newgrp kvm` |
 
 ---
 
@@ -357,7 +378,8 @@ agyInABasket/
 ├── shell/
 │   └── aiab.bash           # Shell wrapper for ~/.bashrc or ~/.bash_aliases
 ├── scripts/
-│   └── install.sh          # One-click host builder and initial installer
+│   ├── install.sh          # One-click host builder and initial installer
+│   └── install-kata.sh     # Automated Kata Containers 3.32.0+ installer
 ├── tests/
 │   └── test_runner.sh      # Automated test suite
 ├── .dockerignore           # Excludes local files from Docker build context
