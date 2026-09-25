@@ -75,8 +75,8 @@ if getent group kvm >/dev/null 2>&1; then
 fi
 
 # 3. Determine version and download URL
-# Default to 3.12.0: Stable release bundling the complete kata-runtime OCI engine
-DEFAULT_VERSION="3.12.0"
+# Default to 3.32.0: Stable release bundling Docker 29+ time-namespace fix (PR #13082) and complete microVM stack
+DEFAULT_VERSION="3.32.0"
 VERSION="${1:-$DEFAULT_VERSION}"
 
 TMP_DIR="$(mktemp -d)"
@@ -89,14 +89,14 @@ DOWNLOAD_URL=""
 
 echo "🌐 Resolving Kata Containers release (${VERSION})..."
 candidates=(
-    "https://github.com/kata-containers/kata-containers/releases/download/${VERSION}/kata-static-${VERSION}-${PRIMARY_ARCH}.tar.xz"
     "https://github.com/kata-containers/kata-containers/releases/download/${VERSION}/kata-static-${VERSION}-${PRIMARY_ARCH}.tar.zst"
-    "https://github.com/kata-containers/kata-containers/releases/download/${VERSION}/kata-static-${VERSION}-${ALT_ARCH}.tar.xz"
+    "https://github.com/kata-containers/kata-containers/releases/download/${VERSION}/kata-static-${VERSION}-${PRIMARY_ARCH}.tar.xz"
     "https://github.com/kata-containers/kata-containers/releases/download/${VERSION}/kata-static-${VERSION}-${ALT_ARCH}.tar.zst"
-    "https://github.com/kata-containers/kata-containers/releases/download/v${VERSION}/kata-static-${VERSION}-${PRIMARY_ARCH}.tar.xz"
+    "https://github.com/kata-containers/kata-containers/releases/download/${VERSION}/kata-static-${VERSION}-${ALT_ARCH}.tar.xz"
     "https://github.com/kata-containers/kata-containers/releases/download/v${VERSION}/kata-static-${VERSION}-${PRIMARY_ARCH}.tar.zst"
-    "https://github.com/kata-containers/kata-containers/releases/download/v${VERSION}/kata-static-${VERSION}-${ALT_ARCH}.tar.xz"
+    "https://github.com/kata-containers/kata-containers/releases/download/v${VERSION}/kata-static-${VERSION}-${PRIMARY_ARCH}.tar.xz"
     "https://github.com/kata-containers/kata-containers/releases/download/v${VERSION}/kata-static-${VERSION}-${ALT_ARCH}.tar.zst"
+    "https://github.com/kata-containers/kata-containers/releases/download/v${VERSION}/kata-static-${VERSION}-${ALT_ARCH}.tar.xz"
 )
 for cand in "${candidates[@]}"; do
     status="$(curl -sIL -o /dev/null -w "%{http_code}" "$cand" || true)"
@@ -179,7 +179,11 @@ fi
 echo "📦 Extracting Kata Containers static bundle to /opt/kata..."
 sudo mkdir -p /opt/kata
 if [[ "$TAR_NAME" == *.zst ]]; then
-    sudo tar --zstd -xf "${TMP_DIR}/${TAR_NAME}" -C /
+    if sudo tar --zstd -tf "${TMP_DIR}/${TAR_NAME}" >/dev/null 2>&1; then
+        sudo tar --zstd -xf "${TMP_DIR}/${TAR_NAME}" -C /
+    else
+        sudo zstd -dc "${TMP_DIR}/${TAR_NAME}" | sudo tar -xf - -C /
+    fi
 elif [[ "$TAR_NAME" == *.xz ]]; then
     sudo tar -xJf "${TMP_DIR}/${TAR_NAME}" -C /
 elif [[ "$TAR_NAME" == *.gz ]]; then

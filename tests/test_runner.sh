@@ -432,6 +432,7 @@ test_case "scripts/install-kata.sh detects and cleans up existing installations"
 assert_contains "$(cat "${INSTALL_KATA_SH}")" "Clean up prior installation to prevent version conflicts" "install-kata.sh includes prior version cleanup step"
 assert_contains "$(cat "${INSTALL_KATA_SH}")" "rm -rf /opt/kata" "install-kata.sh cleans existing /opt/kata directory"
 assert_contains "$(cat "${INSTALL_KATA_SH}")" "rm -f /usr/local/bin/kata-runtime" "install-kata.sh cleans existing symlinks"
+assert_contains "$(cat "${INSTALL_KATA_SH}")" 'DEFAULT_VERSION="3.32.0"' "install-kata.sh defaults to 3.32.0 with Docker 29+ time-namespace support"
 
 test_case "aiab handles Podman Kata incompatibility gracefully"
 podman_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=podman KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --kata 2>&1 || true)
