@@ -9,6 +9,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AIAB_BIN="${REPO_DIR}/bin/aiab"
 ENTRYPOINT="${REPO_DIR}/entrypoint.sh"
 INSTALL_SH="${REPO_DIR}/scripts/install.sh"
+INSTALL_KATA_SH="${REPO_DIR}/scripts/install-kata.sh"
 AIAB_BASH="${REPO_DIR}/shell/aiab.bash"
 
 PASSED=0
@@ -75,12 +76,13 @@ test_case "Syntax checking bash scripts"
 bash -n "${AIAB_BIN}" && \
 bash -n "${ENTRYPOINT}" && \
 bash -n "${INSTALL_SH}" && \
+bash -n "${INSTALL_KATA_SH}" && \
 bash -n "${AIAB_BASH}"
 assert_success $? "All bash scripts pass 'bash -n' syntax verification"
 
 test_case "Permissions check"
-[ -x "${AIAB_BIN}" ] && [ -x "${ENTRYPOINT}" ] && [ -x "${INSTALL_SH}" ]
-assert_success $? "bin/aiab, entrypoint.sh, and scripts/install.sh are executable"
+[ -x "${AIAB_BIN}" ] && [ -x "${ENTRYPOINT}" ] && [ -x "${INSTALL_SH}" ] && [ -x "${INSTALL_KATA_SH}" ]
+assert_success $? "bin/aiab, entrypoint.sh, scripts/install.sh, and scripts/install-kata.sh are executable"
 
 # ------------------------------------------------------------
 # Test 2: Help message output and subcommands listing
@@ -94,9 +96,15 @@ assert_contains "$output" "update" "Lists 'update' subcommand"
 assert_contains "$output" "rebuild" "Lists 'rebuild' subcommand"
 assert_contains "$output" "status" "Lists 'status' subcommand"
 assert_contains "$output" "clean" "Lists 'clean' subcommand"
+assert_contains "$output" "check-kata" "Lists 'check-kata' subcommand"
+assert_contains "$output" "config" "Lists 'config' subcommand"
 assert_contains "$output" "backup-auth" "Lists 'backup-auth' subcommand"
 assert_contains "$output" "reset-auth" "Lists 'reset-auth' subcommand"
 assert_contains "$output" "uninstall" "Lists 'uninstall' subcommand"
+assert_contains "$output" "--kata" "Lists '--kata' argument"
+assert_contains "$output" "--no-kata" "Lists '--no-kata' argument"
+assert_contains "$output" "KATA_RUNTIME" "Lists 'KATA_RUNTIME' config"
+assert_contains "$output" "AIAB_CONFIG_FILE" "Lists 'AIAB_CONFIG_FILE' config"
 
 test_case "aiab -h works as shorthand for --help"
 output=$("${AIAB_BIN}" -h 2>&1)
@@ -112,6 +120,9 @@ mkdir -p "${MOCK_BIN}"
 cat << 'EOF' > "${MOCK_BIN}/docker"
 #!/usr/bin/env bash
 if [ "${1:-}" = "info" ]; then
+    if [ -n "${MOCK_DOCKER_INFO_OUTPUT:-}" ]; then
+        echo "${MOCK_DOCKER_INFO_OUTPUT}"
+    fi
     exit 0
 fi
 if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
@@ -247,6 +258,200 @@ EOF
 
 clean_output=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" clean 2>&1)
 assert_contains "$clean_output" "Cleanup finished!" "aiab clean executes cleanup flow"
+
+# ------------------------------------------------------------
+# Test 10: Kata Containers & Hypervisor Integration
+# ------------------------------------------------------------
+test_case "aiab check-kata runs diagnostic check"
+check_kata_out=$(PATH="${MOCK_BIN}:${PATH}" "${AIAB_BIN}" check-kata 2>&1 || true)
+assert_contains "$check_kata_out" "Kata Containers & KVM Hypervisor Diagnostic" "check-kata prints diagnostic header"
+assert_contains "$check_kata_out" "Checking hardware virtualization" "check-kata checks KVM device"
+assert_contains "$check_kata_out" "Checking Kata Containers installation" "check-kata checks Kata binaries"
+
+test_case "aiab status outputs hypervisor isolation section"
+cat << 'EOF' > "${MOCK_BIN}/docker"
+#!/usr/bin/env bash
+if [ "${1:-}" = "info" ]; then exit 0; fi
+if [ "${1:-}" = "images" ]; then echo "IMAGE_LINE"; exit 0; fi
+if [ "${1:-}" = "volume" ]; then echo "VOLUME_LINE"; exit 0; fi
+if [ "${1:-}" = "run" ]; then echo "v1.0.0"; exit 0; fi
+exit 0
+EOF
+status_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" status 2>&1)
+assert_contains "$status_out" "Hypervisor Isolation (Kata Containers)" "status reports Hypervisor isolation section"
+
+test_case "aiab --kata rejects execution when KVM is missing"
+no_kvm_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${TEST_SANDBOX}/nonexistent_kvm" "${AIAB_BIN}" --kata 2>&1 || true)
+assert_contains "$no_kvm_out" "Hardware virtualization is required for Kata Containers" "Reports error on missing KVM"
+
+test_case "aiab --kata passes --runtime=kata-runtime and does not forward --kata to agy"
+cat << 'EOF' > "${MOCK_BIN}/docker"
+#!/usr/bin/env bash
+if [ "${1:-}" = "info" ]; then
+    if [ -n "${MOCK_DOCKER_INFO_OUTPUT:-}" ]; then
+        echo "${MOCK_DOCKER_INFO_OUTPUT}"
+    fi
+    exit 0
+fi
+if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then exit 0; fi
+if [ "${1:-}" = "volume" ]; then exit 0; fi
+if [ "${1:-}" = "run" ]; then
+    echo "MOCK_DOCKER_RUN: $@"
+    exit 0
+fi
+exit 0
+EOF
+MOCK_KVM="${TEST_SANDBOX}/mock_kvm"
+touch "${MOCK_KVM}"
+chmod 666 "${MOCK_KVM}"
+
+kata_run_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --kata --continue 2>&1)
+assert_contains "$kata_run_out" "--runtime=kata-runtime" "Appends --runtime=kata-runtime to container run"
+assert_contains "$kata_run_out" "Hypervisor Isolation: Kata Containers microVM active" "Displays hypervisor announcement banner"
+assert_contains "$kata_run_out" "--continue" "Forwards target arguments"
+
+run_cmd_line=$(echo "$kata_run_out" | grep "MOCK_DOCKER_RUN:" || true)
+if echo "$run_cmd_line" | grep -q "agy-yolo:latest.*--kata"; then
+    echo -e "  ${RED}✗ FAIL:${NC} --kata was forwarded to agy inside container"
+    FAILED=$((FAILED + 1))
+else
+    echo -e "  ${GREEN}✓ PASS:${NC} --kata flag is filtered out of inner container arguments"
+    PASSED=$((PASSED + 1))
+fi
+
+test_case "aiab supports AIAB_KATA=1 environment variable"
+env_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker AIAB_KATA=1 KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
+assert_contains "$env_kata_out" "--runtime=kata-runtime" "AIAB_KATA=1 appends --runtime=kata-runtime"
+
+test_case "aiab --hypervisor works as alias for --kata"
+alias_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --hypervisor 2>&1)
+assert_contains "$alias_kata_out" "--runtime=kata-runtime" "--hypervisor flag enables Kata microVM runtime"
+
+# ------------------------------------------------------------
+# Test 11: Configuration Management & Persistence
+# ------------------------------------------------------------
+test_case "aiab config show displays settings and file path"
+TEST_CONFIG="${TEST_SANDBOX}/test_config"
+cfg_show_out=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config show 2>&1)
+assert_contains "$cfg_show_out" "=== agyInABasket Configuration ===" "Displays configuration header"
+assert_contains "$cfg_show_out" "${TEST_CONFIG}" "Displays custom config file path"
+
+test_case "aiab config set and get modify and read persistent settings"
+AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config set AIAB_KATA 1 >/dev/null
+val_kata=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config get AIAB_KATA)
+if [ "$val_kata" = "1" ]; then
+    echo -e "  ${GREEN}✓ PASS:${NC} AIAB_KATA was set and retrieved as '1'"
+    PASSED=$((PASSED + 1))
+else
+    echo -e "  ${RED}✗ FAIL:${NC} Expected AIAB_KATA to be '1', got '$val_kata'"
+    FAILED=$((FAILED + 1))
+fi
+
+AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config set DEFAULT_MODEL "Gemini 2.5 Pro" >/dev/null
+val_model=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config get DEFAULT_MODEL)
+if [ "$val_model" = "Gemini 2.5 Pro" ]; then
+    echo -e "  ${GREEN}✓ PASS:${NC} DEFAULT_MODEL was set and retrieved as 'Gemini 2.5 Pro'"
+    PASSED=$((PASSED + 1))
+else
+    echo -e "  ${RED}✗ FAIL:${NC} Expected DEFAULT_MODEL to be 'Gemini 2.5 Pro', got '$val_model'"
+    FAILED=$((FAILED + 1))
+fi
+
+test_case "aiab activates Kata microVM by default when enabled in config file"
+cfg_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
+assert_contains "$cfg_kata_out" "--runtime=kata-runtime" "Persistent config enabled Kata microVM runtime"
+assert_contains "$cfg_kata_out" "--model Gemini 2.5 Pro" "Persistent config injected default model"
+
+test_case "aiab --no-kata overrides persistent config and disables Kata runtime"
+no_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" --no-kata 2>&1)
+if echo "$no_kata_out" | grep -q -- "--runtime=kata-runtime"; then
+    echo -e "  ${RED}✗ FAIL:${NC} --no-kata failed to disable Kata runtime"
+    FAILED=$((FAILED + 1))
+else
+    echo -e "  ${GREEN}✓ PASS:${NC} --no-kata flag successfully disabled Kata runtime"
+    PASSED=$((PASSED + 1))
+fi
+
+test_case "CLI --model overrides config DEFAULT_MODEL"
+model_override_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" --model "Claude 3.7 Sonnet" 2>&1)
+assert_contains "$model_override_out" "Claude 3.7 Sonnet" "CLI --model overrides config default model"
+
+test_case "aiab config reset restores defaults"
+AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config reset >/dev/null
+reset_kata=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config get AIAB_KATA)
+reset_model=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config get DEFAULT_MODEL)
+if [ "$reset_kata" = "auto" ] && [ -z "$reset_model" ]; then
+    echo -e "  ${GREEN}✓ PASS:${NC} Configuration was reset to defaults (AIAB_KATA=auto)"
+    PASSED=$((PASSED + 1))
+else
+    echo -e "  ${RED}✗ FAIL:${NC} Reset failed (AIAB_KATA=$reset_kata, DEFAULT_MODEL=$reset_model)"
+    FAILED=$((FAILED + 1))
+fi
+
+# ------------------------------------------------------------
+# Test 12: Defaulting to Kata when installed
+# ------------------------------------------------------------
+test_case "aiab defaults to Kata microVM when installed and AIAB_KATA is auto"
+# Create mock kata-runtime executable in PATH
+cat << 'EOF' > "${MOCK_BIN}/kata-runtime"
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/kata-runtime"
+
+# With kata-runtime in PATH and MOCK_KVM present, default run should use Kata
+auto_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
+assert_contains "$auto_kata_out" "--runtime=kata-runtime" "Auto-detected Kata and enabled microVM by default"
+assert_contains "$auto_kata_out" "Hypervisor Isolation: Kata Containers microVM active" "Auto-announced microVM banner"
+
+test_case "aiab falls back to standard container when Kata is not installed and AIAB_KATA is auto"
+# Remove mock kata-runtime
+rm -f "${MOCK_BIN}/kata-runtime"
+fallback_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
+if echo "$fallback_out" | grep -q -- "--runtime=kata-runtime"; then
+    echo -e "  ${RED}✗ FAIL:${NC} Erroneously enabled Kata runtime when kata-runtime was missing"
+    FAILED=$((FAILED + 1))
+else
+    echo -e "  ${GREEN}✓ PASS:${NC} Gracefully fell back to standard container when kata-runtime was missing"
+    PASSED=$((PASSED + 1))
+fi
+
+test_case "aiab detects Kata binary in /opt/kata/bin/kata-runtime"
+OPT_KATA_DIR="${TEST_SANDBOX}/opt/kata/bin"
+mkdir -p "${OPT_KATA_DIR}"
+cat << 'EOF' > "${OPT_KATA_DIR}/kata-runtime"
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "${OPT_KATA_DIR}/kata-runtime"
+
+opt_kata_out=$(PATH="${OPT_KATA_DIR}:${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
+assert_contains "$opt_kata_out" "--runtime=kata-runtime" "Auto-detected Kata static binary in /opt/kata/bin"
+
+test_case "scripts/install-kata.sh detects and cleans up existing installations"
+assert_contains "$(cat "${INSTALL_KATA_SH}")" "Clean up prior installation to prevent version conflicts" "install-kata.sh includes prior version cleanup step"
+assert_contains "$(cat "${INSTALL_KATA_SH}")" "rm -rf /opt/kata" "install-kata.sh cleans existing /opt/kata directory"
+assert_contains "$(cat "${INSTALL_KATA_SH}")" "rm -f /usr/local/bin/kata-runtime" "install-kata.sh cleans existing symlinks"
+assert_contains "$(cat "${INSTALL_KATA_SH}")" 'DEFAULT_VERSION="3.32.0"' "install-kata.sh defaults to 3.32.0 with Docker 29+ time-namespace support"
+
+test_case "aiab handles Podman Kata incompatibility gracefully"
+podman_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=podman KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --kata 2>&1 || true)
+assert_contains "$podman_kata_out" "Podman does not support Kata Containers" "Informs user of Podman Kata incompatibility"
+
+test_case "aiab routes Docker to io.containerd.kata.v2 when containerd-shim-kata-v2 is in PATH"
+cat << 'EOF' > "${MOCK_BIN}/containerd-shim-kata-v2"
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/containerd-shim-kata-v2"
+
+docker_shim_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --kata 2>&1)
+assert_contains "$docker_shim_out" "--runtime=io.containerd.kata.v2" "Docker automatically uses io.containerd.kata.v2 from PATH"
+
+test_case "aiab preserves kata-runtime when explicitly registered in docker info"
+docker_registered_out=$(PATH="${MOCK_BIN}:${PATH}" MOCK_DOCKER_INFO_OUTPUT="Runtimes: runc kata-runtime" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --kata 2>&1)
+assert_contains "$docker_registered_out" "--runtime=kata-runtime" "Docker uses kata-runtime when present in docker info"
+rm -f "${MOCK_BIN}/containerd-shim-kata-v2"
 
 # Clean up sandbox
 rm -rf "${TEST_SANDBOX}"

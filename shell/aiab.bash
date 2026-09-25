@@ -15,7 +15,7 @@ aiab() {
     # Fallback to direct execution if running without installed binary
     local first_arg="${1:-}"
     case "$first_arg" in
-        update|rebuild|status|clean|backup-auth|reset-auth|uninstall)
+        update|rebuild|status|clean|check-kata|config|backup-auth|reset-auth|uninstall)
             echo "❌ Maintenance commands require the installed aiab binary in ~/.local/bin." >&2
             echo "Run ./scripts/install.sh first." >&2
             return 1
