@@ -212,18 +212,8 @@ If you prefer installing manually:
    sudo ln -sf /opt/kata/bin/kata-ctl /usr/local/bin/kata-ctl
    sudo ln -sf /opt/kata/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
    ```
-4. If using Docker, register the runtime in `/etc/docker/daemon.json`:
-   ```json
-   {
-     "runtimes": {
-       "kata-runtime": {
-         "path": "/usr/local/bin/containerd-shim-kata-v2",
-         "runtimeType": "io.containerd.kata.v2"
-       }
-     }
-   }
-   ```
-   Then reload Docker: `sudo systemctl restart docker`.
+4. Docker integration:
+   With `containerd-shim-kata-v2` symlinked to `/usr/local/bin`, Docker/containerd automatically discovers the runtime as `io.containerd.kata.v2` from your `$PATH` without requiring any changes to `/etc/docker/daemon.json`.
 5. Load and persist the kernel acceleration modules (`vhost`, `vhost_net`, `vhost_vsock`):
    ```bash
    sudo modprobe vhost vhost_net vhost_vsock

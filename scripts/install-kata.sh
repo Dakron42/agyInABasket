@@ -203,40 +203,32 @@ elif [ -e "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" ]; then
     sudo ln -sf /opt/kata/runtime-rs/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
 fi
 
-# 9. Container engine registration
+# 9. Docker containerd shim integration
 if command -v docker >/dev/null 2>&1; then
-    echo "🐳 Configuring Docker daemon for Kata Containers..."
+    echo "🐳 Verifying Docker containerd shim integration..."
+    # Clean up broken daemon.json if previously created with incompatible keys
     DAEMON_JSON="/etc/docker/daemon.json"
-    sudo mkdir -p /etc/docker
     if [ -f "$DAEMON_JSON" ]; then
-        if command -v jq >/dev/null 2>&1; then
-            sudo jq '.runtimes["kata-runtime"] = {"path": "/usr/local/bin/containerd-shim-kata-v2", "runtimeType": "io.containerd.kata.v2"}' "$DAEMON_JSON" > "${TMP_DIR}/daemon.json"
-            sudo cp "${TMP_DIR}/daemon.json" "$DAEMON_JSON"
-            echo "✓ Added 'kata-runtime' to ${DAEMON_JSON}"
-        elif command -v python3 >/dev/null 2>&1; then
-            sudo python3 -c "import json; p='$DAEMON_JSON'; data = json.load(open(p)) if open(p).read().strip() else {}; data.setdefault('runtimes', {})['kata-runtime'] = {'path': '/usr/local/bin/containerd-shim-kata-v2', 'runtimeType': 'io.containerd.kata.v2'}; open(p, 'w').write(json.dumps(data, indent=2))"
-            echo "✓ Added 'kata-runtime' to ${DAEMON_JSON}"
-        else
-            echo "ℹ️ Please verify /etc/docker/daemon.json contains the kata-runtime definition."
+        if grep -q "kata-runtime" "$DAEMON_JSON" 2>/dev/null; then
+            echo "   Cleaning up legacy kata-runtime entry from ${DAEMON_JSON} to protect Docker..."
+            if command -v jq >/dev/null 2>&1; then
+                cleaned="$(sudo jq 'del(.runtimes["kata-runtime"])' "$DAEMON_JSON" 2>/dev/null || true)"
+                if [ -n "$cleaned" ] && [ "$cleaned" != "{}" ] && [ "$cleaned" != '{"runtimes":{}}' ]; then
+                    echo "$cleaned" | sudo tee "$DAEMON_JSON" >/dev/null
+                else
+                    sudo rm -f "$DAEMON_JSON"
+                fi
+            else
+                sudo rm -f "$DAEMON_JSON"
+            fi
+            if systemctl is-active --quiet docker 2>/dev/null; then
+                sudo systemctl restart docker 2>/dev/null || true
+            fi
         fi
-    else
-        cat << 'EOF' | sudo tee "$DAEMON_JSON" >/dev/null
-{
-  "runtimes": {
-    "kata-runtime": {
-      "path": "/usr/local/bin/containerd-shim-kata-v2",
-      "runtimeType": "io.containerd.kata.v2"
-    }
-  }
-}
-EOF
-        echo "✓ Created ${DAEMON_JSON} with kata-runtime registered."
     fi
-
-    if systemctl is-active --quiet docker 2>/dev/null; then
-        echo "🔄 Reloading Docker daemon..."
-        sudo systemctl restart docker 2>/dev/null || true
-    fi
+    echo "✓ containerd-shim-kata-v2 is available in /usr/local/bin."
+    echo "  Docker automatically discovers 'io.containerd.kata.v2' via containerd PATH lookup."
+    echo "  No /etc/docker/daemon.json modification required."
 fi
 
 if command -v podman >/dev/null 2>&1; then

@@ -99,7 +99,12 @@ find_kata_binary() {
         "$(command -v kata-runtime 2>/dev/null || true)" \
         "/opt/kata/bin/kata-runtime" \
         "/usr/local/bin/kata-runtime" \
-        "/usr/bin/kata-runtime"; do
+        "/usr/bin/kata-runtime" \
+        "$(command -v containerd-shim-kata-v2 2>/dev/null || true)" \
+        "/usr/local/bin/containerd-shim-kata-v2" \
+        "/usr/bin/containerd-shim-kata-v2" \
+        "/opt/kata/bin/containerd-shim-kata-v2" \
+        "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2"; do
         if [ -n "$standard_path" ] && [ -x "$standard_path" ]; then
             echo "$standard_path"
             return 0
@@ -414,12 +419,13 @@ cmd_check_kata() {
     else
         echo "   Detected container engine: ${runtime_found}"
         if [ "$runtime_found" = "docker" ]; then
-            if docker info 2>/dev/null | grep -qi "kata"; then
+            if docker info 2>/dev/null | grep -qi "kata-runtime"; then
                 echo "   ✓ Kata runtime is registered in Docker daemon."
+            elif command -v containerd-shim-kata-v2 >/dev/null 2>&1 || [ -x "/usr/local/bin/containerd-shim-kata-v2" ] || [ -x "/usr/bin/containerd-shim-kata-v2" ] || [ -x "/opt/kata/bin/containerd-shim-kata-v2" ] || [ -x "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" ]; then
+                echo "   ✓ containerd-shim-kata-v2 detected in PATH."
+                echo "     Docker will run Kata microVMs via containerd shim: io.containerd.kata.v2"
             else
-                echo "   ℹ️ Docker is active. To register Kata runtime in Docker (/etc/docker/daemon.json):"
-                echo '      { "runtimes": { "kata-runtime": { "runtimeType": "io.containerd.kata.v2" } } }'
-                echo "      Then restart docker: sudo systemctl restart docker"
+                echo "   ℹ️ Docker is active, but containerd-shim-kata-v2 is not yet in PATH."
             fi
         elif [ "$runtime_found" = "podman" ]; then
             echo "   ⚠️ Podman detected: Podman does NOT support Kata Containers."
@@ -884,9 +890,14 @@ if [ "$USE_KATA" = "1" ]; then
     fi
 
     local_kata_target="${KATA_RUNTIME}"
-    detected_kata_bin="$(find_kata_binary 2>/dev/null || true)"
-    if [ "$CONTAINER_RUNTIME" = "podman" ] && [ -n "$detected_kata_bin" ] && [ "${KATA_RUNTIME}" = "kata-runtime" ]; then
-        local_kata_target="$detected_kata_bin"
+    if [ "$CONTAINER_RUNTIME" = "docker" ] && [ "${KATA_RUNTIME}" = "kata-runtime" ]; then
+        if command -v containerd-shim-kata-v2 >/dev/null 2>&1 || [ -x "/usr/local/bin/containerd-shim-kata-v2" ] || [ -x "/usr/bin/containerd-shim-kata-v2" ] || [ -x "/opt/kata/bin/containerd-shim-kata-v2" ] || [ -x "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" ]; then
+            if docker info 2>/dev/null | grep -qi "kata-runtime"; then
+                local_kata_target="kata-runtime"
+            else
+                local_kata_target="io.containerd.kata.v2"
+            fi
+        fi
     fi
     RUN_FLAGS+=("--runtime=${local_kata_target}")
 fi

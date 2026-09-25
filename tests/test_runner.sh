@@ -120,6 +120,9 @@ mkdir -p "${MOCK_BIN}"
 cat << 'EOF' > "${MOCK_BIN}/docker"
 #!/usr/bin/env bash
 if [ "${1:-}" = "info" ]; then
+    if [ -n "${MOCK_DOCKER_INFO_OUTPUT:-}" ]; then
+        echo "${MOCK_DOCKER_INFO_OUTPUT}"
+    fi
     exit 0
 fi
 if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
@@ -284,7 +287,12 @@ assert_contains "$no_kvm_out" "Hardware virtualization is required for Kata Cont
 test_case "aiab --kata passes --runtime=kata-runtime and does not forward --kata to agy"
 cat << 'EOF' > "${MOCK_BIN}/docker"
 #!/usr/bin/env bash
-if [ "${1:-}" = "info" ]; then exit 0; fi
+if [ "${1:-}" = "info" ]; then
+    if [ -n "${MOCK_DOCKER_INFO_OUTPUT:-}" ]; then
+        echo "${MOCK_DOCKER_INFO_OUTPUT}"
+    fi
+    exit 0
+fi
 if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then exit 0; fi
 if [ "${1:-}" = "volume" ]; then exit 0; fi
 if [ "${1:-}" = "run" ]; then
@@ -428,6 +436,21 @@ assert_contains "$(cat "${INSTALL_KATA_SH}")" "rm -f /usr/local/bin/kata-runtime
 test_case "aiab handles Podman Kata incompatibility gracefully"
 podman_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=podman KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --kata 2>&1 || true)
 assert_contains "$podman_kata_out" "Podman does not support Kata Containers" "Informs user of Podman Kata incompatibility"
+
+test_case "aiab routes Docker to io.containerd.kata.v2 when containerd-shim-kata-v2 is in PATH"
+cat << 'EOF' > "${MOCK_BIN}/containerd-shim-kata-v2"
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/containerd-shim-kata-v2"
+
+docker_shim_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --kata 2>&1)
+assert_contains "$docker_shim_out" "--runtime=io.containerd.kata.v2" "Docker automatically uses io.containerd.kata.v2 from PATH"
+
+test_case "aiab preserves kata-runtime when explicitly registered in docker info"
+docker_registered_out=$(PATH="${MOCK_BIN}:${PATH}" MOCK_DOCKER_INFO_OUTPUT="Runtimes: runc kata-runtime" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --kata 2>&1)
+assert_contains "$docker_registered_out" "--runtime=kata-runtime" "Docker uses kata-runtime when present in docker info"
+rm -f "${MOCK_BIN}/containerd-shim-kata-v2"
 
 # Clean up sandbox
 rm -rf "${TEST_SANDBOX}"
