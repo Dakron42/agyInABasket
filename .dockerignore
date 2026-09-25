@@ -1,6 +1,16 @@
 .git
 .gitignore
 .dockerignore
+.github/
 *.log
+*.md
+*.jpeg
+*.jpg
+*.png
 scratch/
 .gemini/
+tests/
+shell/
+scripts/
+bin/
+docs/

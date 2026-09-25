@@ -70,7 +70,7 @@ echo "          agyInABasket (aiab) Test Suite                  "
 echo "=========================================================="
 
 # ------------------------------------------------------------
-# Test 1: Bash syntax verification
+# Group 1: Bash syntax verification
 # ------------------------------------------------------------
 test_case "Syntax checking bash scripts"
 bash -n "${AIAB_BIN}" && \
@@ -85,7 +85,7 @@ test_case "Permissions check"
 assert_success $? "bin/aiab, entrypoint.sh, scripts/install.sh, and scripts/install-kata.sh are executable"
 
 # ------------------------------------------------------------
-# Test 2: Help message output and subcommands listing
+# Group 2: Help message output and subcommands listing
 # ------------------------------------------------------------
 test_case "aiab --help displays usage and subcommands"
 output=$("${AIAB_BIN}" --help 2>&1)
@@ -113,6 +113,7 @@ assert_contains "$output" "Usage:" "Shows usage block"
 
 # Setup temporary sandbox for mock environments
 TEST_SANDBOX="$(mktemp -d)"
+trap 'rm -rf "${TEST_SANDBOX}"' EXIT
 MOCK_BIN="${TEST_SANDBOX}/bin"
 mkdir -p "${MOCK_BIN}"
 
@@ -141,14 +142,14 @@ EOF
 chmod +x "${MOCK_BIN}/docker"
 
 # ------------------------------------------------------------
-# Test 3: Validation on non-existent directories
+# Group 3: Validation on non-existent directories
 # ------------------------------------------------------------
 test_case "aiab rejects non-existent directory"
 missing_dir_output=$(PATH="${MOCK_BIN}:${PATH}" "${AIAB_BIN}" "/non/existent/path/for/sure/$$" 2>&1 || true)
 assert_contains "$missing_dir_output" "Directory does not exist" "Displays error message on missing directory"
 
 # ------------------------------------------------------------
-# Test 4: Docker invocation and flags assembly
+# Group 4: Docker invocation and flags assembly
 # ------------------------------------------------------------
 test_case "aiab runs docker with correct args and mounts"
 TARGET_DIR="${TEST_SANDBOX}/project"
@@ -163,7 +164,7 @@ assert_contains "$run_output" "--continue" "Forwarded --continue flag"
 assert_contains "$run_output" "Gemini 2.5 Pro" "Forwarded --model flag"
 
 # ------------------------------------------------------------
-# Test 5: Podman auto-detection, flags, and SELinux volume relabeling
+# Group 5: Podman auto-detection, flags, and SELinux volume relabeling
 # ------------------------------------------------------------
 test_case "aiab supports Podman with --userns=keep-id and :Z volume mount"
 cat << 'EOF' > "${MOCK_BIN}/podman"
@@ -192,7 +193,7 @@ assert_contains "$podman_output" "--userns=keep-id" "Podman uses rootless --user
 assert_contains "$podman_output" "-v ${TARGET_DIR}:/home/minty/workspace:Z" "Workspace volume mounted with SELinux :Z flag"
 
 # ------------------------------------------------------------
-# Test 6: Docker daemon error handling
+# Group 6: Docker daemon error handling
 # ------------------------------------------------------------
 test_case "aiab gracefully handles Docker daemon down"
 cat << 'EOF' > "${MOCK_BIN}/docker"
@@ -207,7 +208,7 @@ daemon_down_output=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB
 assert_contains "$daemon_down_output" "Cannot connect to Docker daemon" "Detects and reports unavailable Docker daemon"
 
 # ------------------------------------------------------------
-# Test 7: entrypoint.sh argument routing
+# Group 7: entrypoint.sh argument routing
 # ------------------------------------------------------------
 test_case "entrypoint.sh default invokes agy with --dangerously-skip-permissions"
 MOCK_AGY_LOG="${TEST_SANDBOX}/agy_invoked.log"
@@ -231,14 +232,29 @@ arbitrary_output=$("${ENTRYPOINT}" echo "hello-from-container")
 assert_contains "$arbitrary_output" "hello-from-container" "Arbitrary commands bypass agy"
 
 # ------------------------------------------------------------
-# Test 8: shell/aiab.bash loading and function export
+# Group 8: shell/aiab.bash loading and function export
 # ------------------------------------------------------------
 test_case "shell/aiab.bash defines aiab function cleanly"
 func_check=$(bash -c "source '${AIAB_BASH}' && type aiab | head -n 1")
 assert_contains "$func_check" "aiab is a function" "aiab is exported as a bash function"
 
+test_case "shell/aiab.bash delegates to aiab in PATH"
+cat << 'EOF' > "${MOCK_BIN}/aiab"
+#!/usr/bin/env bash
+echo "DELEGATED_TO_AIAB: $@"
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/aiab"
+delegation_out=$(bash -c "PATH='${MOCK_BIN}:${PATH}' && source '${AIAB_BASH}' && aiab --test-arg")
+assert_contains "$delegation_out" "DELEGATED_TO_AIAB: --test-arg" "aiab shell function delegates to PATH binary"
+rm -f "${MOCK_BIN}/aiab"
+
+test_case "shell/aiab.bash reports error if aiab not found"
+no_bin_out=$(bash -c "PATH='/nonexistent' HOME='${TEST_SANDBOX}/emptyhome' source '${AIAB_BASH}' && aiab 2>&1" || true)
+assert_contains "$no_bin_out" "executable not found in PATH" "aiab shell function errors when binary is missing"
+
 # ------------------------------------------------------------
-# Test 9: Subcommand routing
+# Group 9: Subcommand routing
 # ------------------------------------------------------------
 test_case "aiab clean invokes pruning"
 cat << 'EOF' > "${MOCK_BIN}/docker"
@@ -260,7 +276,7 @@ clean_output=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB_BIN}"
 assert_contains "$clean_output" "Cleanup finished!" "aiab clean executes cleanup flow"
 
 # ------------------------------------------------------------
-# Test 10: Kata Containers & Hypervisor Integration
+# Group 10: Kata Containers & Hypervisor Integration
 # ------------------------------------------------------------
 test_case "aiab check-kata runs diagnostic check"
 check_kata_out=$(PATH="${MOCK_BIN}:${PATH}" "${AIAB_BIN}" check-kata 2>&1 || true)
@@ -328,7 +344,7 @@ alias_kata_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker KVM_DEVICE=
 assert_contains "$alias_kata_out" "--runtime=kata-runtime" "--hypervisor flag enables Kata microVM runtime"
 
 # ------------------------------------------------------------
-# Test 11: Configuration Management & Persistence
+# Group 11: Configuration Management & Persistence
 # ------------------------------------------------------------
 test_case "aiab config show displays settings and file path"
 TEST_CONFIG="${TEST_SANDBOX}/test_config"
@@ -389,7 +405,7 @@ else
 fi
 
 # ------------------------------------------------------------
-# Test 12: Defaulting to Kata when installed
+# Group 12: Defaulting to Kata when installed
 # ------------------------------------------------------------
 test_case "aiab defaults to Kata microVM when installed and AIAB_KATA is auto"
 # Create mock kata-runtime executable in PATH
@@ -452,6 +468,35 @@ test_case "aiab preserves kata-runtime when explicitly registered in docker info
 docker_registered_out=$(PATH="${MOCK_BIN}:${PATH}" MOCK_DOCKER_INFO_OUTPUT="Runtimes: runc kata-runtime" CONTAINER_RUNTIME=docker KVM_DEVICE="${MOCK_KVM}" "${AIAB_BIN}" "${TARGET_DIR}" --kata 2>&1)
 assert_contains "$docker_registered_out" "--runtime=kata-runtime" "Docker uses kata-runtime when present in docker info"
 rm -f "${MOCK_BIN}/containerd-shim-kata-v2"
+
+# ------------------------------------------------------------
+# Group 13: Advanced CLI features (version, dry-run, key=value, container user)
+# ------------------------------------------------------------
+test_case "aiab version command outputs version 1.1.0"
+ver_out=$("${AIAB_BIN}" version 2>&1)
+assert_contains "$ver_out" "aiab version 1.1.0" "aiab version outputs correct version"
+
+test_case "aiab --version and -V output version 1.1.0"
+flag_ver_out=$("${AIAB_BIN}" --version 2>&1)
+assert_contains "$flag_ver_out" "aiab version 1.1.0" "aiab --version outputs correct version"
+short_ver_out=$("${AIAB_BIN}" -V 2>&1)
+assert_contains "$short_ver_out" "aiab version 1.1.0" "aiab -V outputs correct version"
+
+test_case "aiab --dry-run prints execution command without executing docker"
+dry_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" "${TARGET_DIR}" --dry-run 2>&1)
+assert_contains "$dry_out" "Dry-run mode active" "Dry run banner announced"
+assert_contains "$dry_out" "docker run" "Dry run shows docker command line"
+assert_contains "$dry_out" "-v ${TARGET_DIR}:/home/minty/workspace" "Dry run contains workspace mount"
+
+test_case "aiab supports --model=value and --effort=value syntax"
+eq_args_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" "${TARGET_DIR}" --dry-run --model="Claude 3.7 Sonnet" --effort=high 2>&1)
+assert_contains "$eq_args_out" "--model Claude 3.7 Sonnet" "--model=value expanded to --model value"
+assert_contains "$eq_args_out" "--effort high" "--effort=value expanded to --effort value"
+
+test_case "aiab respects AIAB_CONTAINER_USER for volume mount paths"
+custom_user_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker AIAB_CONTAINER_USER="developer" "${AIAB_BIN}" "${TARGET_DIR}" --dry-run 2>&1)
+assert_contains "$custom_user_out" "/home/developer/workspace" "Workspace mounts to custom container user home"
+assert_contains "$custom_user_out" "/home/developer/.gemini" "Data volume mounts to custom container user home"
 
 # Clean up sandbox
 rm -rf "${TEST_SANDBOX}"

@@ -42,8 +42,8 @@ flowchart TD
         Entrypoint["entrypoint.sh\n(UID/GID Sync)"]
         AGY["Google Antigravity CLI\n(--dangerously-skip-permissions)"]
         Tools["Dev Tools: Python 3, Node, npm, build-essential"]
-        WS["/home/minty/workspace"]
-        GeminiDir["/home/minty/.gemini\n(Tokens, Cache, History)"]
+        WS["Container Workspace\n(/home/<user>/workspace)"]
+        GeminiDir["Container Auth Directory\n(/home/<user>/.gemini)"]
     end
 
     User -->|"aiab ."| Launcher
@@ -76,8 +76,8 @@ cd agyInABasket
 
 The installer will:
 1. Detect your host `UID` and `GID` (`$(id -u):$(id -g)`).
-2. Build the `agy-yolo:latest` and `agy-basket:latest` Docker images.
-3. Initialize the persistent `agy-data` volume.
+2. Build the `agy-yolo:latest` and `agy-basket:latest` container images. Both tags refer to the same underlying image (`agy-yolo` is primary; `agy-basket` is an alias for discoverability).
+3. Initialize the persistent `agy-data` and `agy-config` volumes.
 4. Symlink `aiab` to `~/.local/bin/`.
 5. Offer to source the shell function in your `~/.bashrc` / `~/.bash_aliases`.
 
@@ -153,7 +153,7 @@ flowchart TD
         GuestKernel["Isolated Guest Linux Kernel"]
         subgraph Basket["Basket Container"]
             AGY["Google Antigravity CLI (YOLO Mode)"]
-            WS["Workspace (/home/minty/workspace)"]
+            WS["Container Workspace (/home/<user>/workspace)"]
         end
     end
 
@@ -246,29 +246,13 @@ If you prefer installing manually:
 
 ## 🐚 Shell Function (`~/.bashrc`)
 
-If you prefer using a native bash function on your host machine, you can source [`shell/aiab.bash`](file:///home/minty/workspace/shell/aiab.bash) or add this to your `~/.bashrc`:
+To ensure `aiab` is always available in interactive shell sessions (even if `~/.local/bin` is not yet in your `$PATH`), source [`shell/aiab.bash`](shell/aiab.bash) in your `~/.bashrc` or `~/.bash_aliases`:
 
 ```bash
 source /path/to/agyInABasket/shell/aiab.bash
 ```
 
-Or paste the function directly:
-
-```bash
-aiab() {
-    local target_dir="${1:-.}"
-    if [ -d "$target_dir" ]; then shift; else target_dir="."; fi
-    local resolved_dir; resolved_dir=$(realpath "$target_dir") || return 1
-
-    docker run -it --rm \
-        --name "agy-$(basename "$resolved_dir" | tr -c 'a-zA-Z0-9_' '_')-$$" \
-        -e TERM="${TERM:-xterm-256color}" \
-        -v "agy-data:/home/minty/.gemini" \
-        -v "agy-config:/home/minty/.config" \
-        -v "$resolved_dir:/home/minty/workspace" \
-        agy-yolo "$@"
-}
-```
+The shell function delegates directly to the installed `aiab` binary, ensuring full support for Kata microVM isolation, persistent configuration, and all subcommands.
 
 ---
 

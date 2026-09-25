@@ -17,14 +17,31 @@ fi
 
 # Case 2: First argument is a flag (starts with '-') -> forward to agy in YOLO mode
 if [[ "$1" == -* ]]; then
-    exec agy --dangerously-skip-permissions "$@"
+    has_yolo=false
+    for arg in "$@"; do
+        if [ "$arg" = "--dangerously-skip-permissions" ]; then
+            has_yolo=true
+            break
+        fi
+    done
+    if [ "$has_yolo" = false ]; then
+        exec agy --dangerously-skip-permissions "$@"
+    else
+        exec agy "$@"
+    fi
 fi
 
 # Case 3: Explicitly calling 'agy'
 if [ "$1" = "agy" ]; then
     shift
-    # Ensure YOLO mode is always included unless explicitly provided
-    if [[ " $* " != *" --dangerously-skip-permissions "* ]]; then
+    has_yolo=false
+    for arg in "$@"; do
+        if [ "$arg" = "--dangerously-skip-permissions" ]; then
+            has_yolo=true
+            break
+        fi
+    done
+    if [ "$has_yolo" = false ]; then
         exec agy --dangerously-skip-permissions "$@"
     else
         exec agy "$@"

@@ -50,6 +50,7 @@ echo "🔨 Building container image matching host UID: ${HOST_UID}, GID: ${HOST_
 "$CONTAINER_RUNTIME" build \
     --build-arg USER_UID="${HOST_UID}" \
     --build-arg USER_GID="${HOST_GID}" \
+    --build-arg USER_NAME="${AIAB_CONTAINER_USER:-minty}" \
     -t agy-yolo:latest \
     -t agy-basket:latest \
     "${REPO_DIR}"
@@ -58,8 +59,19 @@ echo "✓ Container image built successfully with tags: agy-yolo:latest, agy-bas
 
 # 3. Create persistent container volumes
 echo "📦 Setting up persistent volumes..."
-"$CONTAINER_RUNTIME" volume create agy-data >/dev/null
-"$CONTAINER_RUNTIME" volume create agy-config >/dev/null
+if "$CONTAINER_RUNTIME" volume inspect agy-data >/dev/null 2>&1; then
+    echo "✓ Persistent volume 'agy-data' already exists (preserved)"
+else
+    "$CONTAINER_RUNTIME" volume create agy-data >/dev/null 2>&1 || true
+    echo "✓ Created persistent volume 'agy-data'"
+fi
+
+if "$CONTAINER_RUNTIME" volume inspect agy-config >/dev/null 2>&1; then
+    echo "✓ Persistent volume 'agy-config' already exists (preserved)"
+else
+    "$CONTAINER_RUNTIME" volume create agy-config >/dev/null 2>&1 || true
+    echo "✓ Created persistent volume 'agy-config'"
+fi
 
 # Check if legacy agy-auth-data exists and offers to migrate
 if "$CONTAINER_RUNTIME" volume inspect agy-auth-data >/dev/null 2>&1; then

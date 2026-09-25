@@ -7,6 +7,12 @@
 
 set -e
 
+AIAB_VERSION="1.1.0"
+
+# Container internal username and home directory (default: minty)
+CONTAINER_USER="${AIAB_CONTAINER_USER:-minty}"
+CONTAINER_HOME="/home/${CONTAINER_USER}"
+
 # Capture environment overrides before loading file config
 ENV_CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-}"
 ENV_AIAB_KATA="${AIAB_KATA:-}"
@@ -15,6 +21,7 @@ ENV_KATA_RUNTIME="${KATA_RUNTIME:-}"
 ENV_KVM_DEVICE="${KVM_DEVICE:-}"
 ENV_DEFAULT_MODEL="${DEFAULT_MODEL:-}"
 ENV_DEFAULT_EFFORT="${DEFAULT_EFFORT:-}"
+ENV_AIAB_DRY_RUN="${AIAB_DRY_RUN:-}"
 
 # Configuration file location (XDG compliant, overridable via AIAB_CONFIG_FILE)
 AIAB_CONFIG_FILE="${AIAB_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/aiab/config}"
@@ -36,11 +43,17 @@ DEFAULT_EFFORT=""
 load_config() {
     if [ -f "${AIAB_CONFIG_FILE}" ]; then
         while IFS='=' read -r key val || [ -n "$key" ]; do
-            # Trim whitespace
-            key="$(echo "$key" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            # Trim whitespace from key
+            key="${key#"${key%%[![:space:]]*}"}"
+            key="${key%"${key##*[![:space:]]}"}"
             # Ignore empty lines and comments
             [[ -z "$key" || "$key" == \#* ]] && continue
-            val="$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^["'"'"']//' -e 's/["'"'"']$//')"
+            # Trim whitespace and strip surrounding quotes from val
+            val="${val#"${val%%[![:space:]]*}"}"
+            val="${val%"${val##*[![:space:]]}"}"
+            if [[ "$val" =~ ^\"(.*)\"$ || "$val" =~ ^\'(.*)\'$ ]]; then
+                val="${BASH_REMATCH[1]}"
+            fi
             case "$key" in
                 AIAB_KATA)          AIAB_KATA="$val" ;;
                 CONTAINER_RUNTIME)  CONTAINER_RUNTIME="$val" ;;
@@ -68,19 +81,19 @@ save_config() {
 # Automatically managed by 'aiab config'. You can also edit this file manually.
 
 # Enable Kata Containers KVM microVM isolation ('auto' = default if installed, '1' = force on, '0' = force off)
-AIAB_KATA="${AIAB_KATA:-auto}"
+AIAB_KATA="${AIAB_KATA}"
 
 # Preferred container engine ('auto', 'podman', or 'docker')
-CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-auto}"
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME}"
 
 # Kata Containers runtime name or binary path
-KATA_RUNTIME="${KATA_RUNTIME:-kata-runtime}"
+KATA_RUNTIME="${KATA_RUNTIME}"
 
 # Default model forwarded to agy (empty for agy default)
-DEFAULT_MODEL="${DEFAULT_MODEL:-}"
+DEFAULT_MODEL="${DEFAULT_MODEL}"
 
 # Default reasoning effort forwarded to agy (empty, 'low', 'medium', 'high')
-DEFAULT_EFFORT="${DEFAULT_EFFORT:-}"
+DEFAULT_EFFORT="${DEFAULT_EFFORT}"
 EOF
 }
 
@@ -144,6 +157,7 @@ Usage:
   aiab [COMMAND]
 
 Commands:
+  version       Display aiab version
   update        Pull latest base image and rebuild container with newest agy CLI
   rebuild       Force clean rebuild of the container image without cache
   status        Display container image, volume sizes, and agy CLI version
@@ -159,6 +173,8 @@ Arguments:
   OPTIONS       Flags forwarded to agy (e.g., --continue, --model, --effort)
   --kata / --hypervisor  Launch container enclosed in a Kata Containers KVM microVM
   --no-kata     Run with standard container isolation (overrides config)
+  --dry-run     Print the container run command without executing it
+  --version / -V Display aiab version
   bash / sh     Launch an interactive bash shell inside the container instead of agy
 
 Examples:
@@ -196,6 +212,9 @@ detect_runtime() {
         return 0
     fi
 
+    # Precedence: Podman is preferred by default for rootless, unprivileged isolation.
+    # Note: If Kata microVM isolation is requested (--kata), aiab will automatically
+    # route execution to Docker since modern Kata Containers requires containerd shimv2.
     if command -v podman >/dev/null 2>&1; then
         CONTAINER_RUNTIME="podman"
     elif command -v docker >/dev/null 2>&1; then
@@ -239,8 +258,9 @@ find_repo_dir() {
     echo ""
 }
 
-# Subcommand: update
-cmd_update() {
+# Helper: build or rebuild container image
+_build_image() {
+    local pull_base="${1:-0}"
     check_runtime
     local repo
     repo="$(find_repo_dir)"
@@ -253,42 +273,31 @@ cmd_update() {
     host_uid="$(id -u)"
     host_gid="$(id -g)"
 
-    echo "🔄 Pulling latest base image and updating agy CLI via ${CONTAINER_RUNTIME}..."
-    "$CONTAINER_RUNTIME" pull ubuntu:24.04
+    if [ "$pull_base" = "1" ]; then
+        "$CONTAINER_RUNTIME" pull ubuntu:24.04
+    fi
+
     "$CONTAINER_RUNTIME" build \
         --no-cache \
         --build-arg USER_UID="${host_uid}" \
         --build-arg USER_GID="${host_gid}" \
+        --build-arg USER_NAME="${CONTAINER_USER}" \
         -t "${AGY_IMAGE}" \
         -t "${BASKET_TAG}" \
         "$repo"
+}
 
+# Subcommand: update
+cmd_update() {
+    echo "🔄 Pulling latest base image and updating agy CLI via ${CONTAINER_RUNTIME}..."
+    _build_image 1
     echo "✓ Update complete! aiab is now running the latest container image."
 }
 
 # Subcommand: rebuild
 cmd_rebuild() {
-    check_runtime
-    local repo
-    repo="$(find_repo_dir)"
-    if [ -z "$repo" ]; then
-        echo "❌ Error: Could not locate agyInABasket repository containing Dockerfile." >&2
-        exit 1
-    fi
-
-    local host_uid host_gid
-    host_uid="$(id -u)"
-    host_gid="$(id -g)"
-
     echo "🔨 Forcing clean rebuild without cache via ${CONTAINER_RUNTIME}..."
-    "$CONTAINER_RUNTIME" build \
-        --no-cache \
-        --build-arg USER_UID="${host_uid}" \
-        --build-arg USER_GID="${host_gid}" \
-        -t "${AGY_IMAGE}" \
-        -t "${BASKET_TAG}" \
-        "$repo"
-
+    _build_image 0
     echo "✓ Rebuild complete!"
 }
 
@@ -717,7 +726,7 @@ cmd_backup_auth() {
     "$CONTAINER_RUNTIME" run --rm \
         -v "${AGY_DATA_VOLUME}:/data:ro" \
         -v "${HOME}:/backup" \
-        busybox tar -czf "/backup/$(basename "${backup_file}")" -C /data .
+        "${AGY_IMAGE}" tar -czf "/backup/$(basename "${backup_file}")" -C /data .
     echo "✓ Backup created at: ${backup_file}"
 }
 
@@ -749,9 +758,14 @@ cmd_uninstall() {
     fi
 }
 
-# Check for help flag
+# Check for help or version flags
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
     show_help
+    exit 0
+fi
+
+if [ "${1:-}" = "version" ] || [ "${1:-}" = "--version" ] || [ "${1:-}" = "-V" ]; then
+    echo "aiab version ${AIAB_VERSION}"
     exit 0
 fi
 
@@ -777,31 +791,51 @@ if [ "${AIAB_HYPERVISOR:-}" = "kata" ]; then
 fi
 
 CLI_KATA_OVERRIDE=""
+AIAB_DRY_RUN="${ENV_AIAB_DRY_RUN:-0}"
 
-# Parse arguments: extract target directory, --kata / --hypervisor flags, and forwarded options
+# Parse arguments: extract target directory, flags, and forwarded options
 RAW_ARGS=("$@")
 FILTERED_ARGS=()
 TARGET_DIR="."
 TARGET_DIR_SET=false
 
 for arg in "${RAW_ARGS[@]}"; do
-    if [ "$arg" = "--kata" ] || [ "$arg" = "--hypervisor" ]; then
-        CLI_KATA_OVERRIDE="1"
-    elif [ "$arg" = "--no-kata" ] || [ "$arg" = "--no-hypervisor" ]; then
-        CLI_KATA_OVERRIDE="0"
-    elif [ "$TARGET_DIR_SET" = false ] && [ -d "$arg" ]; then
-        TARGET_DIR="$arg"
-        TARGET_DIR_SET=true
-    elif [ "$TARGET_DIR_SET" = false ] && [[ "$arg" != -* && "$arg" != "bash" && "$arg" != "sh" ]]; then
-        if [ ! -e "$arg" ]; then
-            echo "❌ Error: Directory does not exist: $arg" >&2
-            exit 1
-        fi
-        TARGET_DIR="$arg"
-        TARGET_DIR_SET=true
-    else
-        FILTERED_ARGS+=("$arg")
-    fi
+    case "$arg" in
+        --kata|--hypervisor)
+            CLI_KATA_OVERRIDE="1"
+            ;;
+        --no-kata|--no-hypervisor)
+            CLI_KATA_OVERRIDE="0"
+            ;;
+        --dry-run)
+            AIAB_DRY_RUN="1"
+            ;;
+        --version|-V)
+            echo "aiab version ${AIAB_VERSION}"
+            exit 0
+            ;;
+        --model=*)
+            FILTERED_ARGS+=("--model" "${arg#*=}")
+            ;;
+        --effort=*)
+            FILTERED_ARGS+=("--effort" "${arg#*=}")
+            ;;
+        *)
+            if [ "$TARGET_DIR_SET" = false ] && [ -d "$arg" ]; then
+                TARGET_DIR="$arg"
+                TARGET_DIR_SET=true
+            elif [ "$TARGET_DIR_SET" = false ] && [[ "$arg" != -* && "$arg" != "bash" && "$arg" != "sh" ]]; then
+                if [ ! -e "$arg" ]; then
+                    echo "❌ Error: Directory does not exist: $arg" >&2
+                    exit 1
+                fi
+                TARGET_DIR="$arg"
+                TARGET_DIR_SET=true
+            else
+                FILTERED_ARGS+=("$arg")
+            fi
+            ;;
+    esac
 done
 
 # Resolve USE_KATA
@@ -912,8 +946,10 @@ if [ "${#FILTERED_ARGS[@]}" -eq 0 ] || [[ "${FILTERED_ARGS[0]}" != "bash" && "${
     fi
 fi
 
-# Generate session container name based on directory basename and PID
-SESSION_NAME="agy-$(basename "$TARGET_DIR" | tr -c 'a-zA-Z0-9_' '_')-$$"
+# Generate session container name based on directory basename and PID (without trailing _)
+dir_slug="$(basename "$TARGET_DIR")"
+dir_slug="${dir_slug//[^a-zA-Z0-9_]/_}"
+SESSION_NAME="agy-${dir_slug}-$$"
 
 echo "🧺 Launching Antigravity via ${CONTAINER_RUNTIME} in isolated basket: $SESSION_NAME"
 if [ "$USE_KATA" = "1" ]; then
@@ -922,10 +958,23 @@ fi
 echo "📂 Workspace: $TARGET_DIR"
 echo "💾 Persisting auth data in volume: $AGY_DATA_VOLUME"
 
+if [ "$AIAB_DRY_RUN" = "1" ]; then
+    echo ""
+    echo "🔍 Dry-run mode active. Container execution command:"
+    echo "$CONTAINER_RUNTIME" run "${RUN_FLAGS[@]}" --rm \
+        --name "$SESSION_NAME" \
+        -e TERM="${TERM:-xterm-256color}" \
+        -v "$TARGET_DIR:${CONTAINER_HOME}/workspace${VOLUME_SUFFIX}" \
+        -v "$AGY_DATA_VOLUME:${CONTAINER_HOME}/.gemini" \
+        -v "$AGY_CONFIG_VOLUME:${CONTAINER_HOME}/.config" \
+        "$AGY_IMAGE" "${FILTERED_ARGS[@]}"
+    exit 0
+fi
+
 exec "$CONTAINER_RUNTIME" run "${RUN_FLAGS[@]}" --rm \
     --name "$SESSION_NAME" \
     -e TERM="${TERM:-xterm-256color}" \
-    -v "$TARGET_DIR:/home/minty/workspace${VOLUME_SUFFIX}" \
-    -v "$AGY_DATA_VOLUME:/home/minty/.gemini" \
-    -v "$AGY_CONFIG_VOLUME:/home/minty/.config" \
+    -v "$TARGET_DIR:${CONTAINER_HOME}/workspace${VOLUME_SUFFIX}" \
+    -v "$AGY_DATA_VOLUME:${CONTAINER_HOME}/.gemini" \
+    -v "$AGY_CONFIG_VOLUME:${CONTAINER_HOME}/.config" \
     "$AGY_IMAGE" "${FILTERED_ARGS[@]}"
