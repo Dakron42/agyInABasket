@@ -798,7 +798,7 @@ cmd_uninstall() {
     read -rp "⚠️ This will delete the agy-in-a-basket container image and wrappers from ~/.local/bin. Proceed? (y/N) " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         rm -f "${HOME}/.local/bin/aiab"
-        "$CONTAINER_RUNTIME" rmi -f "${AGY_IMAGE}" "agy-yolo:latest" "agy-basket:latest" 2>/dev/null || true
+        "$CONTAINER_RUNTIME" rmi -f "${AGY_IMAGE}" 2>/dev/null || true
         echo "✓ Binary and image removed. Persistent volumes ('${AGY_DATA_VOLUME}') were kept intact."
     else
         echo "Uninstall cancelled."
@@ -927,18 +927,12 @@ if [ "$USE_KATA" = "1" ] && [ "$CONTAINER_RUNTIME" = "podman" ]; then
     fi
 fi
 
-# Check if image exists; if agy-in-a-basket doesn't exist, try legacy tags (agy-yolo, agy-basket)
+# Check if container image exists
 if ! "$CONTAINER_RUNTIME" image inspect "$AGY_IMAGE" >/dev/null 2>&1; then
-    if "$CONTAINER_RUNTIME" image inspect "agy-yolo:latest" >/dev/null 2>&1; then
-        AGY_IMAGE="agy-yolo:latest"
-    elif "$CONTAINER_RUNTIME" image inspect "agy-basket:latest" >/dev/null 2>&1; then
-        AGY_IMAGE="agy-basket:latest"
-    else
-        echo "❌ Error: Container image '$AGY_IMAGE' not found in ${CONTAINER_RUNTIME}." >&2
-        echo "Please build the image first by running:" >&2
-        echo "  ./scripts/install.sh" >&2
-        exit 1
-    fi
+    echo "❌ Error: Container image '$AGY_IMAGE' not found in ${CONTAINER_RUNTIME}." >&2
+    echo "Please build the image first by running:" >&2
+    echo "  ./scripts/install.sh" >&2
+    exit 1
 fi
 
 # Ensure persistent volumes exist
