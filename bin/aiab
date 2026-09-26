@@ -259,6 +259,46 @@ check_runtime() {
     fi
 }
 
+# Return array of operational runtimes. If CONTAINER_RUNTIME is specifically set to docker or podman, return just that.
+# If unset or 'auto', return all functional runtimes.
+get_operational_runtimes() {
+    local target="${CONTAINER_RUNTIME:-auto}"
+    local -a rts=()
+
+    if [ "$target" = "docker" ]; then
+        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            echo "docker"
+            return 0
+        else
+            echo "❌ Error: Configured runtime 'docker' is not available or daemon is not running." >&2
+            return 1
+        fi
+    elif [ "$target" = "podman" ]; then
+        if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+            echo "podman"
+            return 0
+        else
+            echo "❌ Error: Configured runtime 'podman' is not available or 'podman info' failed." >&2
+            return 1
+        fi
+    else
+        # Auto mode: probe all functional runtimes
+        if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+            rts+=("podman")
+        fi
+        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            rts+=("docker")
+        fi
+
+        if [ "${#rts[@]}" -eq 0 ]; then
+            echo "❌ Error: Neither Podman nor Docker is running or accessible." >&2
+            return 1
+        fi
+        echo "${rts[*]}"
+        return 0
+    fi
+}
+
 find_repo_dir() {
     if [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/Dockerfile" ]; then
         echo "$REPO_DIR"
@@ -275,10 +315,9 @@ find_repo_dir() {
     echo ""
 }
 
-# Helper: build or rebuild container image
+# Helper: build or rebuild container image across operational runtime(s)
 _build_image() {
     local pull_base="${1:-0}"
-    check_runtime
     local repo
     repo="$(find_repo_dir)"
     if [ -z "$repo" ]; then
@@ -286,48 +325,81 @@ _build_image() {
         exit 1
     fi
 
+    local -a targets
+    IFS=' ' read -r -a targets <<< "$(get_operational_runtimes)"
+
     local host_uid host_gid
     host_uid="$(id -u)"
     host_gid="$(id -g)"
 
-    if [ "$pull_base" = "1" ]; then
-        "$CONTAINER_RUNTIME" pull ubuntu:24.04
-    fi
+    for rt in "${targets[@]}"; do
+        echo "🔨 Building container image via ${rt}..."
+        if [ "$pull_base" = "1" ]; then
+            "$rt" pull ubuntu:24.04 || true
+        fi
 
-    "$CONTAINER_RUNTIME" build \
-        --no-cache \
-        --build-arg USER_UID="${host_uid}" \
-        --build-arg USER_GID="${host_gid}" \
-        --build-arg USER_NAME="${CONTAINER_USER}" \
-        -t "${AGY_IMAGE}" \
-        "$repo"
+        "$rt" build \
+            --no-cache \
+            --build-arg USER_UID="${host_uid}" \
+            --build-arg USER_GID="${host_gid}" \
+            --build-arg USER_NAME="${CONTAINER_USER}" \
+            -t "${AGY_IMAGE}" \
+            "$repo"
+        echo "✓ Image built successfully in ${rt}"
+    done
 }
 
 # Subcommand: update
 cmd_update() {
-    echo "🔄 Pulling latest base image and updating agy CLI via ${CONTAINER_RUNTIME}..."
+    echo "🔄 Pulling latest base image and updating agy CLI..."
     _build_image 1
     echo "✓ Update complete! aiab is now running the latest container image."
 }
 
 # Subcommand: rebuild
 cmd_rebuild() {
-    echo "🔨 Forcing clean rebuild without cache via ${CONTAINER_RUNTIME}..."
+    echo "🔨 Forcing clean rebuild without cache..."
     _build_image 0
     echo "✓ Rebuild complete!"
 }
 
 # Subcommand: status
 cmd_status() {
-    check_runtime
-    echo "=== agyInABasket (aiab) Status [Runtime: ${CONTAINER_RUNTIME}] ==="
+    local -a targets
+    if ! targets_str="$(get_operational_runtimes 2>/dev/null)"; then
+        check_runtime
+    fi
+    IFS=' ' read -r -a targets <<< "$targets_str"
+
+    echo "=== agyInABasket (aiab) Status ==="
+    echo "Operational Runtime(s): ${targets[*]}"
     echo ""
-    echo "--- Container Image ---"
-    "$CONTAINER_RUNTIME" images "${AGY_IMAGE}" --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}"
-    echo ""
-    echo "--- Persistent Volumes ---"
-    "$CONTAINER_RUNTIME" volume ls --filter "name=agy-"
-    echo ""
+
+    for rt in "${targets[@]}"; do
+        echo "=========================================================="
+        echo "  Engine: ${rt}"
+        echo "=========================================================="
+        echo "--- Container Image ---"
+        if "$rt" image inspect "${AGY_IMAGE}" >/dev/null 2>&1; then
+            "$rt" images "${AGY_IMAGE}" --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}"
+        else
+            echo "⚠️ Image '${AGY_IMAGE}' not found in ${rt}. Run 'aiab rebuild' or install.sh."
+        fi
+        echo ""
+        echo "--- Persistent Volumes ---"
+        "$rt" volume ls --filter "name=agy-"
+        echo ""
+        echo "--- agy CLI Version (inside container) ---"
+        if "$rt" image inspect "${AGY_IMAGE}" >/dev/null 2>&1; then
+            "$rt" run --rm "${AGY_IMAGE}" bash -c \
+                "agy --version 2>/dev/null || agy version 2>/dev/null || agy changelog 2>/dev/null | head -n 3" \
+                || echo "Version check unavailable."
+        else
+            echo "Cannot check version: image not found."
+        fi
+        echo ""
+    done
+
     echo "--- Hypervisor Isolation (Kata Containers) ---"
     if [ -e "${KVM_DEVICE}" ]; then
         if [ -r "${KVM_DEVICE}" ] && [ -w "${KVM_DEVICE}" ]; then
@@ -356,10 +428,6 @@ cmd_status() {
         fi
     fi
     echo ""
-    echo "--- agy CLI Version (inside container) ---"
-    "$CONTAINER_RUNTIME" run --rm "${AGY_IMAGE}" bash -c \
-        "agy --version 2>/dev/null || agy version 2>/dev/null || agy changelog 2>/dev/null | head -n 3" \
-        || echo "Version check unavailable."
 }
 
 # Subcommand: check-kata
@@ -744,49 +812,91 @@ cmd_config() {
 
 # Subcommand: clean
 cmd_clean() {
-    check_runtime
-    echo "🧹 Pruning stopped agy containers and dangling aiab images via ${CONTAINER_RUNTIME}..."
-    local stopped_containers
-    stopped_containers="$("$CONTAINER_RUNTIME" ps -a --filter "name=agy-" --filter "status=exited" -q 2>/dev/null || true)"
-    if [ -n "$stopped_containers" ]; then
-        echo "$stopped_containers" | xargs "$CONTAINER_RUNTIME" rm 2>/dev/null || true
+    local -a targets
+    if ! targets_str="$(get_operational_runtimes 2>/dev/null)"; then
+        check_runtime
+        targets=("$CONTAINER_RUNTIME")
+    else
+        IFS=' ' read -r -a targets <<< "$targets_str"
     fi
-    "$CONTAINER_RUNTIME" image prune -f --filter "label=org.aiab.managed=true"
+
+    echo "🧹 Pruning stopped agy containers and dangling aiab images across: ${targets[*]}..."
+    for rt in "${targets[@]}"; do
+        echo "  [${rt}] Pruning stopped containers..."
+        local stopped_containers
+        stopped_containers="$("$rt" ps -a --filter "name=agy-" --filter "status=exited" -q 2>/dev/null || true)"
+        if [ -n "$stopped_containers" ]; then
+            echo "$stopped_containers" | xargs "$rt" rm 2>/dev/null || true
+        fi
+        echo "  [${rt}] Pruning dangling images..."
+        "$rt" image prune -f --filter "label=org.aiab.managed=true" 2>/dev/null || true
+    done
+    echo "✓ Cleanup finished across all operational runtimes!"
     echo "✓ Cleanup finished!"
 }
 
 # Subcommand: backup-auth
 cmd_backup_auth() {
-    check_runtime
-    local backup_file="${HOME}/agy-auth-backup-$(date +%Y%m%d_%H%M%S).tar.gz"
-    local backup_dir
-    backup_dir="$(dirname "${backup_file}")"
-    echo "💾 Backing up ${AGY_DATA_VOLUME} to ${backup_file}..."
-    "$CONTAINER_RUNTIME" run --rm \
-        -v "${AGY_DATA_VOLUME}:/data:ro" \
-        -v "${backup_dir}:/backup" \
-        "${AGY_IMAGE}" tar -czf "/backup/$(basename "${backup_file}")" -C /data .
-    echo "✓ Backup created at: ${backup_file}"
+    local -a targets
+    if ! targets_str="$(get_operational_runtimes 2>/dev/null)"; then
+        check_runtime
+        targets=("$CONTAINER_RUNTIME")
+    else
+        IFS=' ' read -r -a targets <<< "$targets_str"
+    fi
+
+    local timestamp
+    timestamp="$(date +%Y%m%d_%H%M%S)"
+
+    for rt in "${targets[@]}"; do
+        local backup_file="${HOME}/agy-auth-backup-${rt}-${timestamp}.tar.gz"
+        local backup_dir
+        backup_dir="$(dirname "${backup_file}")"
+
+        if ! "$rt" volume inspect "${AGY_DATA_VOLUME}" >/dev/null 2>&1; then
+            echo "ℹ️ Volume '${AGY_DATA_VOLUME}' does not exist in ${rt}, skipping."
+            continue
+        fi
+
+        echo "💾 Backing up ${AGY_DATA_VOLUME} (${rt}) to ${backup_file}..."
+        if "$rt" image inspect "${AGY_IMAGE}" >/dev/null 2>&1; then
+            "$rt" run --rm \
+                -v "${AGY_DATA_VOLUME}:/data:ro" \
+                -v "${backup_dir}:/backup" \
+                "${AGY_IMAGE}" tar -czf "/backup/$(basename "${backup_file}")" -C /data .
+            echo "✓ Backup created at: ${backup_file}"
+        else
+            echo "⚠️ Warning: Image '${AGY_IMAGE}' not found in ${rt}. Cannot create backup container." >&2
+        fi
+    done
 }
 
 # Subcommand: reset-auth
 cmd_reset_auth() {
-    check_runtime
-    read -rp "⚠️ Are you sure you want to reset persistent auth data? You will need to log into Antigravity again. (y/N) " confirm
+    local -a targets
+    if ! targets_str="$(get_operational_runtimes 2>/dev/null)"; then
+        check_runtime
+        targets=("$CONTAINER_RUNTIME")
+    else
+        IFS=' ' read -r -a targets <<< "$targets_str"
+    fi
+
+    read -rp "⚠️ Are you sure you want to reset persistent auth data across all detected engines (${targets[*]})? You will need to log into Antigravity again. (y/N) " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        echo "🗑️ Resetting ${AGY_DATA_VOLUME} and ${AGY_CONFIG_VOLUME}..."
-        if ! "$CONTAINER_RUNTIME" volume rm -f "${AGY_DATA_VOLUME}" "${AGY_CONFIG_VOLUME}"; then
-            echo "⚠️ Warning: Failed to remove one or more volumes (they may be in use by a running container)." >&2
-        fi
-        if ! "$CONTAINER_RUNTIME" volume create "${AGY_DATA_VOLUME}" >/dev/null; then
-            echo "❌ Error: Failed to recreate persistent volume '${AGY_DATA_VOLUME}'." >&2
-            return 1
-        fi
-        if ! "$CONTAINER_RUNTIME" volume create "${AGY_CONFIG_VOLUME}" >/dev/null; then
-            echo "❌ Error: Failed to recreate persistent volume '${AGY_CONFIG_VOLUME}'." >&2
-            return 1
-        fi
-        echo "✓ Auth reset. Fresh volumes created."
+        for rt in "${targets[@]}"; do
+            echo "🗑️ Resetting ${AGY_DATA_VOLUME} and ${AGY_CONFIG_VOLUME} in ${rt}..."
+            if ! "$rt" volume rm -f "${AGY_DATA_VOLUME}" "${AGY_CONFIG_VOLUME}" 2>/dev/null; then
+                echo "⚠️ Warning: Failed to remove one or more volumes in ${rt} (they may be in use by a running container)." >&2
+            fi
+            if ! "$rt" volume create "${AGY_DATA_VOLUME}" >/dev/null; then
+                echo "❌ Error: Failed to recreate persistent volume '${AGY_DATA_VOLUME}' in ${rt}." >&2
+            fi
+            if ! "$rt" volume create "${AGY_CONFIG_VOLUME}" >/dev/null; then
+                echo "❌ Error: Failed to recreate persistent volume '${AGY_CONFIG_VOLUME}' in ${rt}." >&2
+            fi
+            echo "✓ Volumes reset in ${rt}."
+        done
+        echo "✓ Auth reset complete. Fresh volumes created across: ${targets[*]}."
     else
         echo "Operation cancelled."
     fi
@@ -794,12 +904,23 @@ cmd_reset_auth() {
 
 # Subcommand: uninstall
 cmd_uninstall() {
-    check_runtime
-    read -rp "⚠️ This will delete the agy-in-a-basket container image and wrappers from ~/.local/bin. Proceed? (y/N) " confirm
+    local -a targets
+    if ! targets_str="$(get_operational_runtimes 2>/dev/null)"; then
+        check_runtime
+        targets=("$CONTAINER_RUNTIME")
+    else
+        IFS=' ' read -r -a targets <<< "$targets_str"
+    fi
+
+    read -rp "⚠️ This will delete the agy-in-a-basket container image from all detected engines (${targets[*]}) and host wrappers from ~/.local/bin. Proceed? (y/N) " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         rm -f "${HOME}/.local/bin/aiab"
-        "$CONTAINER_RUNTIME" rmi -f "${AGY_IMAGE}" 2>/dev/null || true
-        echo "✓ Binary and image removed. Persistent volumes ('${AGY_DATA_VOLUME}') were kept intact."
+        for rt in "${targets[@]}"; do
+            echo "🗑️ Removing '${AGY_IMAGE}' from ${rt}..."
+            "$rt" rmi -f "${AGY_IMAGE}" 2>/dev/null || true
+            echo "✓ Image removed from ${rt}."
+        done
+        echo "✓ Binary and image(s) removed. Persistent volumes ('${AGY_DATA_VOLUME}') were kept intact."
     else
         echo "Uninstall cancelled."
     fi

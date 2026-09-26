@@ -524,6 +524,8 @@ test_case "aiab backup-auth mounts only the backup directory rather than full HO
 cat << 'EOF' > "${MOCK_BIN}/docker"
 #!/usr/bin/env bash
 if [ "${1:-}" = "info" ]; then exit 0; fi
+if [ "${1:-}" = "volume" ] && [ "${2:-}" = "inspect" ]; then exit 0; fi
+if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then exit 0; fi
 if [ "${1:-}" = "run" ]; then
     echo "MOCK_BACKUP_RUN: $@"
     exit 0
@@ -534,6 +536,67 @@ MOCK_HOME="${TEST_SANDBOX}/mock_home"
 mkdir -p "${MOCK_HOME}"
 backup_out=$(PATH="${MOCK_BIN}:${PATH}" HOME="${MOCK_HOME}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" backup-auth 2>&1)
 assert_contains "$backup_out" "-v ${MOCK_HOME}:/backup" "Mounts only the target backup directory"
+
+# ------------------------------------------------------------
+# Group 15: Dual-Runtime (Docker + Podman) Maintenance Operations
+# ------------------------------------------------------------
+# Setup dual-runtime mock where both docker and podman are operational
+cat << EOF > "${MOCK_BIN}/docker"
+#!/usr/bin/env bash
+echo "MOCK_DOCKER: \$@" >> "${TEST_SANDBOX}/dual_runtime_calls.log"
+if [ "\${1:-}" = "info" ]; then exit 0; fi
+if [ "\${1:-}" = "images" ]; then echo "DOCKER_IMAGE_LIST"; exit 0; fi
+if [ "\${1:-}" = "image" ] && [ "\${2:-}" = "inspect" ]; then exit 0; fi
+if [ "\${1:-}" = "volume" ]; then exit 0; fi
+if [ "\${1:-}" = "run" ]; then echo "DOCKER_RUN: \$@"; exit 0; fi
+exit 0
+EOF
+
+cat << EOF > "${MOCK_BIN}/podman"
+#!/usr/bin/env bash
+echo "MOCK_PODMAN: \$@" >> "${TEST_SANDBOX}/dual_runtime_calls.log"
+if [ "\${1:-}" = "info" ]; then exit 0; fi
+if [ "\${1:-}" = "images" ]; then echo "PODMAN_IMAGE_LIST"; exit 0; fi
+if [ "\${1:-}" = "image" ] && [ "\${2:-}" = "inspect" ]; then exit 0; fi
+if [ "\${1:-}" = "volume" ]; then exit 0; fi
+if [ "\${1:-}" = "run" ]; then echo "PODMAN_RUN: \$@"; exit 0; fi
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/docker" "${MOCK_BIN}/podman"
+
+test_case "aiab status reports both engines when both are available"
+status_dual_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=auto "${AIAB_BIN}" status 2>&1)
+assert_contains "$status_dual_out" "Engine: podman" "Status outputs Podman section"
+assert_contains "$status_dual_out" "Engine: docker" "Status outputs Docker section"
+
+test_case "aiab clean purges stopped containers across both engines in dual mode"
+: > "${TEST_SANDBOX}/dual_runtime_calls.log"
+clean_dual_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=auto "${AIAB_BIN}" clean 2>&1)
+calls_clean=$(cat "${TEST_SANDBOX}/dual_runtime_calls.log")
+assert_contains "$calls_clean" "MOCK_PODMAN: ps -a" "Podman containers checked for clean"
+assert_contains "$calls_clean" "MOCK_DOCKER: ps -a" "Docker containers checked for clean"
+assert_contains "$clean_dual_out" "Cleanup finished across all operational runtimes!" "Clean announces completion across all runtimes"
+
+test_case "aiab backup-auth backs up volumes for all active engines"
+: > "${TEST_SANDBOX}/dual_runtime_calls.log"
+backup_dual_out=$(PATH="${MOCK_BIN}:${PATH}" HOME="${MOCK_HOME}" CONTAINER_RUNTIME=auto "${AIAB_BIN}" backup-auth 2>&1)
+assert_contains "$backup_dual_out" "Backing up agy-data (podman)" "Podman volume backed up"
+assert_contains "$backup_dual_out" "Backing up agy-data (docker)" "Docker volume backed up"
+
+test_case "aiab reset-auth confirms and resets volumes in both engines"
+: > "${TEST_SANDBOX}/dual_runtime_calls.log"
+reset_dual_out=$(echo "y" | PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=auto "${AIAB_BIN}" reset-auth 2>&1)
+calls_reset=$(cat "${TEST_SANDBOX}/dual_runtime_calls.log")
+assert_contains "$calls_reset" "MOCK_PODMAN: volume rm -f agy-data agy-config" "Podman volumes removed"
+assert_contains "$calls_reset" "MOCK_DOCKER: volume rm -f agy-data agy-config" "Docker volumes removed"
+assert_contains "$reset_dual_out" "Auth reset complete. Fresh volumes created across: podman docker" "Reset confirmed across all engines"
+
+test_case "aiab uninstall removes images from all detected engines"
+: > "${TEST_SANDBOX}/dual_runtime_calls.log"
+uninstall_dual_out=$(echo "y" | PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=auto "${AIAB_BIN}" uninstall 2>&1)
+calls_uninstall=$(cat "${TEST_SANDBOX}/dual_runtime_calls.log")
+assert_contains "$calls_uninstall" "MOCK_PODMAN: rmi -f agy-in-a-basket:latest" "Podman image removed"
+assert_contains "$calls_uninstall" "MOCK_DOCKER: rmi -f agy-in-a-basket:latest" "Docker image removed"
 
 # Clean up sandbox
 rm -rf "${TEST_SANDBOX}"
