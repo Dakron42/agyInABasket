@@ -38,7 +38,7 @@ flowchart TD
         DockerVol["Container Volume: agy-data (~/.gemini)"]
     end
 
-    subgraph Container["Isolated Container (agy-yolo)"]
+    subgraph Container["Isolated Container (agy-in-a-basket)"]
         Entrypoint["entrypoint.sh\n(UID/GID Sync)"]
         AGY["Google Antigravity CLI\n(--dangerously-skip-permissions)"]
         Tools["Dev Tools: Python 3, Node, npm, build-essential"]
@@ -76,7 +76,7 @@ cd agyInABasket
 
 The installer will:
 1. Detect your host `UID` and `GID` (`$(id -u):$(id -g)`).
-2. Build the `agy-yolo:latest` and `agy-basket:latest` container images. Both tags refer to the same underlying image (`agy-yolo` is primary; `agy-basket` is an alias for discoverability).
+2. Build the `agy-in-a-basket:latest` container image.
 3. Initialize the persistent `agy-data` and `agy-config` volumes.
 4. Symlink `aiab` to `~/.local/bin/`.
 5. Offer to source the shell function in your `~/.bashrc` / `~/.bash_aliases`.

@@ -29,8 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scoped `cmd_clean` image pruning to `org.aiab.managed=true` to prevent pruning unrelated host images.
 - Consolidated `cmd_status` version check into a single container execution.
 - Replaced `xargs -r` GNU extension in `cmd_clean` with portable shell check.
-- Added connection timeouts (`--connect-timeout 5 --max-time 10`) to candidate asset downloads in `scripts/install-kata.sh`.
-- Replaced legacy `busybox` references across scripts with the primary container image (`agy-yolo:latest`).
+- Standardized container image to a single canonical tag: `agy-in-a-basket:latest` (with automatic fallback to legacy `agy-yolo` and `agy-basket` tags).
+- Replaced legacy `busybox` references across scripts with the primary container image (`agy-in-a-basket:latest`).
 - Sanitized session slug naming to prevent trailing underscores from command substitution.
 
 ---

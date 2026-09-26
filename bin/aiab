@@ -28,8 +28,7 @@ AIAB_CONFIG_FILE="${AIAB_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/aiab/c
 AIAB_CONFIG_DIR="$(dirname "${AIAB_CONFIG_FILE}")"
 
 # Configuration defaults
-AGY_IMAGE="${AGY_IMAGE:-agy-yolo:latest}"
-BASKET_TAG="${BASKET_TAG:-agy-basket:latest}"
+AGY_IMAGE="${AGY_IMAGE:-agy-in-a-basket:latest}"
 AGY_DATA_VOLUME="${AGY_DATA_VOLUME:-agy-data}"
 AGY_CONFIG_VOLUME="${AGY_CONFIG_VOLUME:-agy-config}"
 CONTAINER_RUNTIME=""
@@ -211,7 +210,7 @@ Examples:
 
 Configuration:
   CONTAINER_RUNTIME Container engine to use: 'docker', 'podman', or 'auto' (default: auto)
-  AGY_IMAGE         Container image to run (default: agy-yolo:latest)
+  AGY_IMAGE         Container image to run (default: agy-in-a-basket:latest)
   AGY_DATA_VOLUME   Container volume for persistent auth & tokens (default: agy-data)
   AGY_CONFIG_VOLUME Container volume for persistent configs (default: agy-config)
   AIAB_KATA         Enable Kata Containers microVM hypervisor isolation by default (1/0)
@@ -301,7 +300,6 @@ _build_image() {
         --build-arg USER_GID="${host_gid}" \
         --build-arg USER_NAME="${CONTAINER_USER}" \
         -t "${AGY_IMAGE}" \
-        -t "${BASKET_TAG}" \
         "$repo"
 }
 
@@ -797,11 +795,11 @@ cmd_reset_auth() {
 # Subcommand: uninstall
 cmd_uninstall() {
     check_runtime
-    read -rp "⚠️ This will delete the agy-yolo container images and wrappers from ~/.local/bin. Proceed? (y/N) " confirm
+    read -rp "⚠️ This will delete the agy-in-a-basket container image and wrappers from ~/.local/bin. Proceed? (y/N) " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         rm -f "${HOME}/.local/bin/aiab"
-        "$CONTAINER_RUNTIME" rmi -f "${AGY_IMAGE}" "${BASKET_TAG}" 2>/dev/null || true
-        echo "✓ Binary and images removed. Persistent volumes ('${AGY_DATA_VOLUME}') were kept intact."
+        "$CONTAINER_RUNTIME" rmi -f "${AGY_IMAGE}" "agy-yolo:latest" "agy-basket:latest" 2>/dev/null || true
+        echo "✓ Binary and image removed. Persistent volumes ('${AGY_DATA_VOLUME}') were kept intact."
     else
         echo "Uninstall cancelled."
     fi
@@ -929,10 +927,12 @@ if [ "$USE_KATA" = "1" ] && [ "$CONTAINER_RUNTIME" = "podman" ]; then
     fi
 fi
 
-# Check if image exists; if agy-yolo doesn't exist, try agy-basket:latest
+# Check if image exists; if agy-in-a-basket doesn't exist, try legacy tags (agy-yolo, agy-basket)
 if ! "$CONTAINER_RUNTIME" image inspect "$AGY_IMAGE" >/dev/null 2>&1; then
-    if "$CONTAINER_RUNTIME" image inspect "${BASKET_TAG}" >/dev/null 2>&1; then
-        AGY_IMAGE="${BASKET_TAG}"
+    if "$CONTAINER_RUNTIME" image inspect "agy-yolo:latest" >/dev/null 2>&1; then
+        AGY_IMAGE="agy-yolo:latest"
+    elif "$CONTAINER_RUNTIME" image inspect "agy-basket:latest" >/dev/null 2>&1; then
+        AGY_IMAGE="agy-basket:latest"
     else
         echo "❌ Error: Container image '$AGY_IMAGE' not found in ${CONTAINER_RUNTIME}." >&2
         echo "Please build the image first by running:" >&2

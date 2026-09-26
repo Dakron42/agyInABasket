@@ -29,4 +29,4 @@ jobs:
 
       - name: Verify Docker image builds
         run: |
-          docker build --build-arg USER_UID=1001 --build-arg USER_GID=1001 -t agy-test .
+          docker build --build-arg USER_UID=1001 --build-arg USER_GID=1001 -t agy-in-a-basket:latest .

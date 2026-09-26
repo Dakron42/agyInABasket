@@ -330,7 +330,7 @@ assert_contains "$kata_run_out" "Hypervisor Isolation: Kata Containers microVM a
 assert_contains "$kata_run_out" "--continue" "Forwards target arguments"
 
 run_cmd_line=$(echo "$kata_run_out" | grep "MOCK_DOCKER_RUN:" || true)
-if echo "$run_cmd_line" | grep -q "agy-yolo:latest.*--kata"; then
+if echo "$run_cmd_line" | grep -q "agy-in-a-basket:latest.*--kata"; then
     echo -e "  ${RED}✗ FAIL:${NC} --kata was forwarded to agy inside container"
     FAILED=$((FAILED + 1))
 else
@@ -534,6 +534,27 @@ MOCK_HOME="${TEST_SANDBOX}/mock_home"
 mkdir -p "${MOCK_HOME}"
 backup_out=$(PATH="${MOCK_BIN}:${PATH}" HOME="${MOCK_HOME}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" backup-auth 2>&1)
 assert_contains "$backup_out" "-v ${MOCK_HOME}:/backup" "Mounts only the target backup directory"
+
+test_case "aiab falls back to legacy agy-yolo:latest image when agy-in-a-basket is absent"
+cat << 'EOF' > "${MOCK_BIN}/docker"
+#!/usr/bin/env bash
+if [ "${1:-}" = "info" ]; then exit 0; fi
+if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
+    if [ "${3:-}" = "agy-in-a-basket:latest" ]; then
+        exit 1
+    elif [ "${3:-}" = "agy-yolo:latest" ]; then
+        exit 0
+    fi
+fi
+if [ "${1:-}" = "volume" ]; then exit 0; fi
+if [ "${1:-}" = "run" ]; then
+    echo "MOCK_DOCKER_RUN: $@"
+    exit 0
+fi
+exit 0
+EOF
+legacy_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
+assert_contains "$legacy_out" "agy-yolo:latest" "Gracefully fell back to legacy agy-yolo:latest image"
 
 # Clean up sandbox
 rm -rf "${TEST_SANDBOX}"

@@ -51,11 +51,10 @@ echo "🔨 Building container image matching host UID: ${HOST_UID}, GID: ${HOST_
     --build-arg USER_UID="${HOST_UID}" \
     --build-arg USER_GID="${HOST_GID}" \
     --build-arg USER_NAME="${AIAB_CONTAINER_USER:-minty}" \
-    -t agy-yolo:latest \
-    -t agy-basket:latest \
+    -t agy-in-a-basket:latest \
     "${REPO_DIR}"
 
-echo "✓ Container image built successfully with tags: agy-yolo:latest, agy-basket:latest"
+echo "✓ Container image built successfully with tag: agy-in-a-basket:latest"
 
 # 3. Create persistent container volumes
 echo "📦 Setting up persistent volumes..."
@@ -79,7 +78,7 @@ if "$CONTAINER_RUNTIME" volume inspect agy-auth-data >/dev/null 2>&1; then
     "$CONTAINER_RUNTIME" run --rm \
         -v "agy-auth-data:/from:ro" \
         -v "agy-data:/to" \
-        agy-yolo:latest sh -c "cp -an /from/. /to/ 2>/dev/null || true" || true
+        agy-in-a-basket:latest sh -c "cp -an /from/. /to/ 2>/dev/null || true" || true
 fi
 
 # 4. Install host CLI wrapper into ~/.local/bin
