@@ -4,7 +4,7 @@
 # Supports both Docker and Podman container engines.
 #
 
-set -e
+set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="${HOME}/.local/bin"
@@ -34,8 +34,8 @@ echo "🐳 Detected container runtime: ${CONTAINER_RUNTIME}"
 if [ "$CONTAINER_RUNTIME" = "docker" ]; then
     if ! docker info >/dev/null 2>&1; then
         echo "❌ Error: Cannot connect to the Docker daemon." >&2
-        echo "Make sure the Docker service is running ('sudo systemctl start docker') and that your user '$USER' belongs to the 'docker' group." >&2
-        echo "To add your user to the docker group: sudo usermod -aG docker \$USER && newgrp docker" >&2
+        echo "Make sure the Docker service is running ('sudo systemctl start docker') and that your user '${USER:-$(id -un)}' belongs to the 'docker' group." >&2
+        echo "To add your user to the docker group: sudo usermod -aG docker \${USER:-\$(id -un)} && newgrp docker" >&2
         exit 1
     fi
 elif [ "$CONTAINER_RUNTIME" = "podman" ]; then
@@ -79,7 +79,7 @@ if "$CONTAINER_RUNTIME" volume inspect agy-auth-data >/dev/null 2>&1; then
     "$CONTAINER_RUNTIME" run --rm \
         -v "agy-auth-data:/from:ro" \
         -v "agy-data:/to" \
-        busybox sh -c "cp -an /from/* /to/ 2>/dev/null || true" || true
+        agy-yolo:latest sh -c "cp -an /from/* /to/ 2>/dev/null || true" || true
 fi
 
 # 4. Install host CLI wrapper into ~/.local/bin

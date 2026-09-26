@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: Run Test Suite & Linting
+    name: Lint & Test
     runs-on: ubuntu-latest
 
     steps:

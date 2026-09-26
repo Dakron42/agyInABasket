@@ -9,6 +9,7 @@
 *.png
 scratch/
 .gemini/
+# Exclude tests, shell wrappers, host scripts, and launcher (build only requires entrypoint.sh)
 tests/
 shell/
 scripts/

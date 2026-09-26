@@ -42,12 +42,23 @@ DEFAULT_EFFORT=""
 
 load_config() {
     if [ -f "${AIAB_CONFIG_FILE}" ]; then
-        while IFS='=' read -r key val || [ -n "$key" ]; do
+        while IFS= read -r line || [ -n "$line" ]; do
+            # Trim whitespace from line
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            # Ignore empty lines and comments
+            [[ -z "$line" || "$line" == \#* ]] && continue
+            # Must contain '=' to be a valid key=value pair
+            [[ "$line" != *=* ]] && continue
+
+            local key="${line%%=*}"
+            local val="${line#*=}"
+
             # Trim whitespace from key
             key="${key#"${key%%[![:space:]]*}"}"
             key="${key%"${key##*[![:space:]]}"}"
-            # Ignore empty lines and comments
-            [[ -z "$key" || "$key" == \#* ]] && continue
+            [[ -z "$key" ]] && continue
+
             # Trim whitespace and strip surrounding quotes from val
             val="${val#"${val%%[![:space:]]*}"}"
             val="${val%"${val##*[![:space:]]}"}"
@@ -107,18 +118,25 @@ find_kata_binary() {
         return 0
     fi
 
+    local -a search_paths=()
+    local cv
+    cv="$(command -v kata-runtime 2>/dev/null || true)"
+    [ -n "$cv" ] && search_paths+=("$cv")
+    cv="$(command -v containerd-shim-kata-v2 2>/dev/null || true)"
+    [ -n "$cv" ] && search_paths+=("$cv")
+    search_paths+=(
+        "/opt/kata/bin/kata-runtime"
+        "/usr/local/bin/kata-runtime"
+        "/usr/bin/kata-runtime"
+        "/usr/local/bin/containerd-shim-kata-v2"
+        "/usr/bin/containerd-shim-kata-v2"
+        "/opt/kata/bin/containerd-shim-kata-v2"
+        "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2"
+    )
+
     local standard_path
-    for standard_path in \
-        "$(command -v kata-runtime 2>/dev/null || true)" \
-        "/opt/kata/bin/kata-runtime" \
-        "/usr/local/bin/kata-runtime" \
-        "/usr/bin/kata-runtime" \
-        "$(command -v containerd-shim-kata-v2 2>/dev/null || true)" \
-        "/usr/local/bin/containerd-shim-kata-v2" \
-        "/usr/bin/containerd-shim-kata-v2" \
-        "/opt/kata/bin/containerd-shim-kata-v2" \
-        "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2"; do
-        if [ -n "$standard_path" ] && [ -x "$standard_path" ]; then
+    for standard_path in "${search_paths[@]}"; do
+        if [ -x "$standard_path" ]; then
             echo "$standard_path"
             return 0
         fi
@@ -171,8 +189,8 @@ Commands:
 Arguments:
   DIRECTORY     Path to project directory (default: current directory '.')
   OPTIONS       Flags forwarded to agy (e.g., --continue, --model, --effort)
-  --kata / --hypervisor  Launch container enclosed in a Kata Containers KVM microVM
-  --no-kata     Run with standard container isolation (overrides config)
+  --kata / --hypervisor      Launch container enclosed in a Kata Containers KVM microVM
+  --no-kata / --no-hypervisor Run with standard container isolation (overrides config)
   --dry-run     Print the container run command without executing it
   --version / -V Display aiab version
   bash / sh     Launch an interactive bash shell inside the container instead of agy
@@ -341,7 +359,10 @@ cmd_status() {
     fi
     echo ""
     echo "--- agy CLI Version (inside container) ---"
-    "$CONTAINER_RUNTIME" run --rm "${AGY_IMAGE}" agy changelog 2>/dev/null | head -n 10 || echo "Version check unavailable."
+    "$CONTAINER_RUNTIME" run --rm "${AGY_IMAGE}" agy --version 2>/dev/null || \
+        "$CONTAINER_RUNTIME" run --rm "${AGY_IMAGE}" agy version 2>/dev/null || \
+        "$CONTAINER_RUNTIME" run --rm "${AGY_IMAGE}" agy changelog 2>/dev/null | head -n 3 || \
+        echo "Version check unavailable."
 }
 
 # Subcommand: check-kata
@@ -373,13 +394,28 @@ cmd_check_kata() {
     echo "2. Checking kernel acceleration modules (vhost, vhost_net, vhost_vsock)..."
     local missing_mods=()
     local kmod
+    local module_interface_available=false
+    if [ -f /proc/modules ] || [ -d /sys/module ]; then
+        module_interface_available=true
+    fi
+
     for kmod in vhost vhost_net vhost_vsock; do
-        if [ -f /proc/modules ] && ! grep -qw "$kmod" /proc/modules 2>/dev/null; then
-            missing_mods+=("$kmod")
+        # Check /sys/module (built-in or loaded), /proc/modules, and lsmod
+        if [ -d "/sys/module/${kmod}" ]; then
+            continue
+        elif [ -f /proc/modules ] && grep -qw "$kmod" /proc/modules 2>/dev/null; then
+            continue
+        elif command -v lsmod >/dev/null 2>&1 && lsmod 2>/dev/null | grep -qw "$kmod"; then
+            continue
         fi
+        missing_mods+=("$kmod")
     done
-    if [ "${#missing_mods[@]}" -eq 0 ]; then
-        echo "   ✓ Acceleration kernel modules are loaded (vhost, vhost_net, vhost_vsock)."
+
+    if [ "$module_interface_available" = false ]; then
+        echo "   ⚠️ Notice: Kernel module interface (/proc/modules, /sys/module) is not accessible."
+        echo "      Could not verify hardware acceleration modules."
+    elif [ "${#missing_mods[@]}" -eq 0 ]; then
+        echo "   ✓ Acceleration kernel modules are loaded or built-in (vhost, vhost_net, vhost_vsock)."
     else
         echo "   ⚠️ Missing loaded kernel modules: ${missing_mods[*]}"
         echo "      To load them now:"
@@ -713,7 +749,11 @@ cmd_config() {
 cmd_clean() {
     check_runtime
     echo "🧹 Pruning stopped containers and dangling images via ${CONTAINER_RUNTIME}..."
-    "$CONTAINER_RUNTIME" ps -a --filter "name=agy-" --filter "status=exited" -q | xargs -r "$CONTAINER_RUNTIME" rm 2>/dev/null || true
+    local stopped_containers
+    stopped_containers="$("$CONTAINER_RUNTIME" ps -a --filter "name=agy-" --filter "status=exited" -q 2>/dev/null || true)"
+    if [ -n "$stopped_containers" ]; then
+        echo "$stopped_containers" | xargs "$CONTAINER_RUNTIME" rm 2>/dev/null || true
+    fi
     "$CONTAINER_RUNTIME" image prune -f
     echo "✓ Cleanup finished!"
 }
@@ -722,10 +762,12 @@ cmd_clean() {
 cmd_backup_auth() {
     check_runtime
     local backup_file="${HOME}/agy-auth-backup-$(date +%Y%m%d_%H%M%S).tar.gz"
+    local backup_dir
+    backup_dir="$(dirname "${backup_file}")"
     echo "💾 Backing up ${AGY_DATA_VOLUME} to ${backup_file}..."
     "$CONTAINER_RUNTIME" run --rm \
         -v "${AGY_DATA_VOLUME}:/data:ro" \
-        -v "${HOME}:/backup" \
+        -v "${backup_dir}:/backup" \
         "${AGY_IMAGE}" tar -czf "/backup/$(basename "${backup_file}")" -C /data .
     echo "✓ Backup created at: ${backup_file}"
 }
@@ -736,9 +778,17 @@ cmd_reset_auth() {
     read -rp "⚠️ Are you sure you want to reset persistent auth data? You will need to log into Antigravity again. (y/N) " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         echo "🗑️ Resetting ${AGY_DATA_VOLUME} and ${AGY_CONFIG_VOLUME}..."
-        "$CONTAINER_RUNTIME" volume rm -f "${AGY_DATA_VOLUME}" "${AGY_CONFIG_VOLUME}" 2>/dev/null || true
-        "$CONTAINER_RUNTIME" volume create "${AGY_DATA_VOLUME}" >/dev/null
-        "$CONTAINER_RUNTIME" volume create "${AGY_CONFIG_VOLUME}" >/dev/null
+        if ! "$CONTAINER_RUNTIME" volume rm -f "${AGY_DATA_VOLUME}" "${AGY_CONFIG_VOLUME}"; then
+            echo "⚠️ Warning: Failed to remove one or more volumes (they may be in use by a running container)." >&2
+        fi
+        if ! "$CONTAINER_RUNTIME" volume create "${AGY_DATA_VOLUME}" >/dev/null; then
+            echo "❌ Error: Failed to recreate persistent volume '${AGY_DATA_VOLUME}'." >&2
+            return 1
+        fi
+        if ! "$CONTAINER_RUNTIME" volume create "${AGY_CONFIG_VOLUME}" >/dev/null; then
+            echo "❌ Error: Failed to recreate persistent volume '${AGY_CONFIG_VOLUME}'." >&2
+            return 1
+        fi
         echo "✓ Auth reset. Fresh volumes created."
     else
         echo "Operation cancelled."

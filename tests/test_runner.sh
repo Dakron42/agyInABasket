@@ -103,6 +103,7 @@ assert_contains "$output" "reset-auth" "Lists 'reset-auth' subcommand"
 assert_contains "$output" "uninstall" "Lists 'uninstall' subcommand"
 assert_contains "$output" "--kata" "Lists '--kata' argument"
 assert_contains "$output" "--no-kata" "Lists '--no-kata' argument"
+assert_contains "$output" "--no-hypervisor" "Lists '--no-hypervisor' argument alias"
 assert_contains "$output" "KATA_RUNTIME" "Lists 'KATA_RUNTIME' config"
 assert_contains "$output" "AIAB_CONFIG_FILE" "Lists 'AIAB_CONFIG_FILE' config"
 
@@ -154,12 +155,13 @@ assert_contains "$missing_dir_output" "Directory does not exist" "Displays error
 test_case "aiab runs docker with correct args and mounts"
 TARGET_DIR="${TEST_SANDBOX}/project"
 mkdir -p "${TARGET_DIR}"
+EXPECTED_HOME="/home/${AIAB_CONTAINER_USER:-minty}"
 
 run_output=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" "${TARGET_DIR}" --continue --model "Gemini 2.5 Pro" 2>&1)
 assert_contains "$run_output" "MOCK_DOCKER_RUN:" "Successfully invoked docker run"
-assert_contains "$run_output" "-v ${TARGET_DIR}:/home/minty/workspace" "Target directory correctly mounted to /home/minty/workspace"
-assert_contains "$run_output" "-v agy-data:/home/minty/.gemini" "Persistent volume agy-data mounted"
-assert_contains "$run_output" "-v agy-config:/home/minty/.config" "Persistent volume agy-config mounted"
+assert_contains "$run_output" "-v ${TARGET_DIR}:${EXPECTED_HOME}/workspace" "Target directory correctly mounted to workspace"
+assert_contains "$run_output" "-v agy-data:${EXPECTED_HOME}/.gemini" "Persistent volume agy-data mounted"
+assert_contains "$run_output" "-v agy-config:${EXPECTED_HOME}/.config" "Persistent volume agy-config mounted"
 assert_contains "$run_output" "--continue" "Forwarded --continue flag"
 assert_contains "$run_output" "Gemini 2.5 Pro" "Forwarded --model flag"
 
@@ -190,7 +192,7 @@ chmod +x "${MOCK_BIN}/podman"
 podman_output=$(PATH="${MOCK_BIN}:${PATH}" "${AIAB_BIN}" "${TARGET_DIR}" 2>&1)
 assert_contains "$podman_output" "MOCK_PODMAN_RUN:" "Podman detected and invoked"
 assert_contains "$podman_output" "--userns=keep-id" "Podman uses rootless --userns=keep-id flag"
-assert_contains "$podman_output" "-v ${TARGET_DIR}:/home/minty/workspace:Z" "Workspace volume mounted with SELinux :Z flag"
+assert_contains "$podman_output" "-v ${TARGET_DIR}:${EXPECTED_HOME}/workspace:Z" "Workspace volume mounted with SELinux :Z flag"
 
 # ------------------------------------------------------------
 # Group 6: Docker daemon error handling
@@ -486,7 +488,7 @@ test_case "aiab --dry-run prints execution command without executing docker"
 dry_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" "${TARGET_DIR}" --dry-run 2>&1)
 assert_contains "$dry_out" "Dry-run mode active" "Dry run banner announced"
 assert_contains "$dry_out" "docker run" "Dry run shows docker command line"
-assert_contains "$dry_out" "-v ${TARGET_DIR}:/home/minty/workspace" "Dry run contains workspace mount"
+assert_contains "$dry_out" "-v ${TARGET_DIR}:${EXPECTED_HOME}/workspace" "Dry run contains workspace mount"
 
 test_case "aiab supports --model=value and --effort=value syntax"
 eq_args_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" "${TARGET_DIR}" --dry-run --model="Claude 3.7 Sonnet" --effort=high 2>&1)
@@ -497,6 +499,40 @@ test_case "aiab respects AIAB_CONTAINER_USER for volume mount paths"
 custom_user_out=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker AIAB_CONTAINER_USER="developer" "${AIAB_BIN}" "${TARGET_DIR}" --dry-run 2>&1)
 assert_contains "$custom_user_out" "/home/developer/workspace" "Workspace mounts to custom container user home"
 assert_contains "$custom_user_out" "/home/developer/.gemini" "Data volume mounts to custom container user home"
+
+# ------------------------------------------------------------
+# Group 14: Configuration robustness and scoped backup mount
+# ------------------------------------------------------------
+test_case "aiab config ignores malformed lines lacking '='"
+cat << 'EOF' > "${TEST_CONFIG}"
+AIAB_KATA="1"
+INVALID_MALFORMED_LINE_WITHOUT_EQUALS
+DEFAULT_MODEL="Gemini 2.5 Pro"
+EOF
+val_kata=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config get AIAB_KATA)
+val_model=$(AIAB_CONFIG_FILE="${TEST_CONFIG}" "${AIAB_BIN}" config get DEFAULT_MODEL)
+if [ "$val_kata" = "1" ] && [ "$val_model" = "Gemini 2.5 Pro" ]; then
+    echo -e "  ${GREEN}✓ PASS:${NC} Malformed line was ignored; valid keys parsed correctly"
+    PASSED=$((PASSED + 1))
+else
+    echo -e "  ${RED}✗ FAIL:${NC} Config parsing failed with malformed line (AIAB_KATA=$val_kata, DEFAULT_MODEL=$val_model)"
+    FAILED=$((FAILED + 1))
+fi
+
+test_case "aiab backup-auth mounts only the backup directory rather than full HOME"
+cat << 'EOF' > "${MOCK_BIN}/docker"
+#!/usr/bin/env bash
+if [ "${1:-}" = "info" ]; then exit 0; fi
+if [ "${1:-}" = "run" ]; then
+    echo "MOCK_BACKUP_RUN: $@"
+    exit 0
+fi
+exit 0
+EOF
+MOCK_HOME="${TEST_SANDBOX}/mock_home"
+mkdir -p "${MOCK_HOME}"
+backup_out=$(PATH="${MOCK_BIN}:${PATH}" HOME="${MOCK_HOME}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" backup-auth 2>&1)
+assert_contains "$backup_out" "-v ${MOCK_HOME}:/backup" "Mounts only the target backup directory"
 
 # Clean up sandbox
 rm -rf "${TEST_SANDBOX}"

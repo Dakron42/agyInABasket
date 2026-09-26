@@ -265,7 +265,7 @@ Maintenance and lifecycle operations are built directly into `aiab`:
 | `aiab config` | Opens interactive settings menu to set default isolation (Kata on/off), engine, and model. |
 | `aiab update` | Pulls latest Ubuntu base and rebuilds the container with the newest `agy` CLI release. |
 | `aiab rebuild` | Forces a complete rebuild from scratch without Docker cache. |
-| `aiab status` | Inspects container images, volume sizes, CLI version, and Kata hypervisor readiness. |
+| `aiab status` | Shows container image info, persistent volume list, Kata hypervisor readiness, and agy version/changelog. |
 | `aiab check-kata` | Runs diagnostic checks on hardware KVM virtualization, Kata binaries, and runtime daemons. |
 | `aiab clean` | Removes dangling Docker images and stopped `agy` containers. |
 | `aiab backup-auth` | Backs up persistent OAuth tokens and databases to `~/agy-auth-backup-*.tar.gz`. |
@@ -376,7 +376,7 @@ agyInABasket/
 ---
 
 ## 🔒 Security Notes
-- **Sandboxed Scope:** The container only has access to the directory explicitly mounted to `/home/minty/workspace`.
+- **Sandboxed Scope:** The container only has access to the directory explicitly mounted to `/home/<user>/workspace` (inside container).
 - **Ephemeral State:** Any package installed via `sudo apt` during a session will vanish when the container exits, preventing dependency pollution on your host.
 - **Tokens Isolated in Volume:** Auth tokens live exclusively in the `agy-data` Docker volume and are not stored in plaintext inside the project workspaces.
 

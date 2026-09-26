@@ -23,10 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Refactored `cmd_update` and `cmd_rebuild` to use a shared `_build_image` helper.
-- Optimized config parser to use native bash parameter expansion instead of subshell `sed` processes.
-- Updated `entrypoint.sh` YOLO mode detection to iterate exact arguments rather than substring matching.
-- Streamlined `shell/aiab.bash` into a pure delegation wrapper targeting `aiab`.
-- Replaced `busybox` dependency in `cmd_backup_auth` with the existing container image (`${AGY_IMAGE}`).
+- Optimized config parser to use native bash parameter expansion and safely ignore malformed lines lacking `=`.
+- Updated `entrypoint.sh` and `scripts/install.sh` to strict mode (`set -euo pipefail`).
+- Scoped `cmd_backup_auth` volume mount to destination directory rather than entire `$HOME`.
+- Upgraded `cmd_status` to query `agy --version` directly before falling back to changelog.
+- Replaced `xargs -r` GNU extension in `cmd_clean` with portable shell check.
+- Added connection timeouts (`--connect-timeout 5 --max-time 10`) to candidate asset downloads in `scripts/install-kata.sh`.
+- Replaced legacy `busybox` references across scripts with the primary container image (`agy-yolo:latest`).
 - Sanitized session slug naming to prevent trailing underscores from command substitution.
 
 ---

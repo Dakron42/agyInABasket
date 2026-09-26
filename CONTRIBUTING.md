@@ -31,7 +31,7 @@ When adding or altering behavior:
 ## 📋 Pull Request Checklist
 
 When submitting a pull request, ensure:
-- [ ] Code follows existing shell styling and passes `bash -n` syntax checks.
+- [ ] Code follows existing shell styling, passes `bash -n` syntax checks, and passes ShellCheck (`shellcheck -x bin/aiab entrypoint.sh scripts/install.sh scripts/install-kata.sh shell/aiab.bash`).
 - [ ] New/modified behavior includes unit or integration tests in `tests/test_runner.sh`.
 - [ ] Existing test suite passes with zero failures (`./tests/test_runner.sh`).
 - [ ] Documentation (`README.md`) is updated if CLI arguments, commands, or behaviors changed.

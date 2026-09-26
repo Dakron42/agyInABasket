@@ -98,8 +98,9 @@ candidates=(
     "https://github.com/kata-containers/kata-containers/releases/download/v${VERSION}/kata-static-${VERSION}-${ALT_ARCH}.tar.zst"
     "https://github.com/kata-containers/kata-containers/releases/download/v${VERSION}/kata-static-${VERSION}-${ALT_ARCH}.tar.xz"
 )
+echo "🔍 Probing release assets for Kata Containers ${VERSION} (${PRIMARY_ARCH})..."
 for cand in "${candidates[@]}"; do
-    status="$(curl -sIL -o /dev/null -w "%{http_code}" "$cand" || true)"
+    status="$(curl -sIL --connect-timeout 5 --max-time 10 -o /dev/null -w "%{http_code}" "$cand" || true)"
     if [ "$status" = "200" ]; then
         DOWNLOAD_URL="$cand"
         break
