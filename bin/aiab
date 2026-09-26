@@ -486,7 +486,7 @@ cmd_check_kata() {
         echo "      To load them now:"
         echo "        sudo modprobe ${missing_mods[*]}"
         echo "      To load them automatically on boot:"
-        echo "        echo -e '${missing_mods[*]}' | tr ' ' '\n' | sudo tee -a /etc/modules-load.d/kata.conf"
+        printf "        printf '%%s\\n' %s | sudo tee -a /etc/modules-load.d/kata.conf\n" "${missing_mods[*]}"
     fi
     echo ""
 

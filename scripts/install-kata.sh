@@ -152,7 +152,7 @@ fi
 echo "🧹 Checking for existing Kata Containers installation..."
 OLD_VERSION=""
 if [ -f "/opt/kata/VERSION" ]; then
-    OLD_VERSION="$(cat /opt/kata/VERSION 2>/dev/null | tr -d '[:space:]' || true)"
+    OLD_VERSION="$(tr -d '[:space:]' < /opt/kata/VERSION 2>/dev/null || true)"
 elif command -v kata-runtime >/dev/null 2>&1; then
     OLD_VERSION="$(kata-runtime --version 2>/dev/null | head -n 1 | awk '{print $3}' || true)"
 fi
