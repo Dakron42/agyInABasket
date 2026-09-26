@@ -1,5 +1,7 @@
-# syntax=docker/dockerfile:1
 FROM ubuntu:24.04
+
+# Image metadata label for scoped cleanup and identification
+LABEL org.aiab.managed="true"
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -47,6 +49,9 @@ RUN if id -u ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi && \
     echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # 3. Configure Git globally to avoid 'dubious ownership' errors across host volume mounts
+# Safe in this context: the container is ephemeral and only sees the explicitly
+# mounted workspace. This prevents 'dubious ownership' errors when the host
+# UID/GID alignment doesn't perfectly match volume mount metadata.
 RUN git config --system --add safe.directory '*'
 
 # 4. Prepare required directories and permissions
@@ -61,6 +66,7 @@ USER ${USER_NAME}
 WORKDIR /home/${USER_NAME}/workspace
 
 # 6. Install Google Antigravity CLI via official install script
+# (https://antigravity.google/docs/cli/install/ — no version pinning available upstream)
 RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
 
 # 7. Environment configuration

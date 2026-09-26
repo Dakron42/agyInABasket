@@ -7,7 +7,7 @@ Thank you for your interest in improving `agyInABasket`! To maintain project sta
 ## ⚠️ Test Requirement (Mandatory)
 
 > **No tests, no merge.** 
-> Every pull request that introduces new features, bug fixes, or refactors **MUST** include corresponding tests in [`tests/test_runner.sh`](../tests/test_runner.sh), and all automated checks must pass.
+> Every pull request that introduces new features, bug fixes, or refactors **MUST** include corresponding tests in [`tests/test_runner.sh`](tests/test_runner.sh), and all automated checks must pass.
 
 ### Running the Test Suite Locally
 Before submitting a PR, make sure the test suite passes locally:
@@ -18,7 +18,7 @@ Before submitting a PR, make sure the test suite passes locally:
 
 ### Adding Tests for New Features
 When adding or altering behavior:
-1. Open [`tests/test_runner.sh`](../tests/test_runner.sh).
+1. Open [`tests/test_runner.sh`](tests/test_runner.sh).
 2. Add a `test_case "your feature description"`.
 3. Use assertion helpers:
    - `assert_success $? "Description"`
@@ -31,7 +31,7 @@ When adding or altering behavior:
 ## 📋 Pull Request Checklist
 
 When submitting a pull request, ensure:
-- [ ] Code follows existing shell styling and passes `bash -n` syntax checks.
+- [ ] Code follows existing shell styling, passes `bash -n` syntax checks, and passes ShellCheck (`shellcheck -x bin/aiab entrypoint.sh scripts/install.sh scripts/install-kata.sh shell/aiab.bash`).
 - [ ] New/modified behavior includes unit or integration tests in `tests/test_runner.sh`.
 - [ ] Existing test suite passes with zero failures (`./tests/test_runner.sh`).
 - [ ] Documentation (`README.md`) is updated if CLI arguments, commands, or behaviors changed.

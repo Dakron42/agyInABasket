@@ -7,12 +7,154 @@
 
 set -e
 
-# Configuration (can be overridden via environment variables)
-AGY_IMAGE="${AGY_IMAGE:-agy-yolo:latest}"
-BASKET_TAG="${BASKET_TAG:-agy-basket:latest}"
+AIAB_VERSION="1.1.0"
+
+# Container internal username and home directory (default: minty)
+CONTAINER_USER="${AIAB_CONTAINER_USER:-minty}"
+CONTAINER_HOME="/home/${CONTAINER_USER}"
+
+# Capture environment overrides before loading file config
+ENV_CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-}"
+ENV_AIAB_KATA="${AIAB_KATA:-}"
+ENV_AIAB_HYPERVISOR="${AIAB_HYPERVISOR:-}"
+ENV_KATA_RUNTIME="${KATA_RUNTIME:-}"
+ENV_KVM_DEVICE="${KVM_DEVICE:-}"
+ENV_DEFAULT_MODEL="${DEFAULT_MODEL:-}"
+ENV_DEFAULT_EFFORT="${DEFAULT_EFFORT:-}"
+ENV_AIAB_DRY_RUN="${AIAB_DRY_RUN:-}"
+
+# Configuration file location (XDG compliant, overridable via AIAB_CONFIG_FILE)
+AIAB_CONFIG_FILE="${AIAB_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/aiab/config}"
+AIAB_CONFIG_DIR="$(dirname "${AIAB_CONFIG_FILE}")"
+
+# Configuration defaults
+AGY_IMAGE="${AGY_IMAGE:-agy-in-a-basket:latest}"
 AGY_DATA_VOLUME="${AGY_DATA_VOLUME:-agy-data}"
 AGY_CONFIG_VOLUME="${AGY_CONFIG_VOLUME:-agy-config}"
-CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-}"
+CONTAINER_RUNTIME=""
+AIAB_KATA="auto"
+AIAB_HYPERVISOR=""
+KATA_RUNTIME="kata-runtime"
+KVM_DEVICE="/dev/kvm"
+DEFAULT_MODEL=""
+DEFAULT_EFFORT=""
+
+load_config() {
+    if [ -f "${AIAB_CONFIG_FILE}" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            # Trim whitespace from line
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            # Ignore empty lines and comments
+            [[ -z "$line" || "$line" == \#* ]] && continue
+            # Must contain '=' to be a valid key=value pair
+            [[ "$line" != *=* ]] && continue
+
+            local key="${line%%=*}"
+            local val="${line#*=}"
+
+            # Trim whitespace from key
+            key="${key#"${key%%[![:space:]]*}"}"
+            key="${key%"${key##*[![:space:]]}"}"
+            [[ -z "$key" ]] && continue
+
+            # Trim whitespace and strip surrounding quotes from val
+            val="${val#"${val%%[![:space:]]*}"}"
+            val="${val%"${val##*[![:space:]]}"}"
+            if [[ "$val" =~ ^\"(.*)\"$ || "$val" =~ ^\'(.*)\'$ ]]; then
+                val="${BASH_REMATCH[1]}"
+            fi
+            case "$key" in
+                AIAB_KATA)          AIAB_KATA="$val" ;;
+                CONTAINER_RUNTIME)  CONTAINER_RUNTIME="$val" ;;
+                KATA_RUNTIME)       KATA_RUNTIME="$val" ;;
+                DEFAULT_MODEL)      DEFAULT_MODEL="$val" ;;
+                DEFAULT_EFFORT)     DEFAULT_EFFORT="$val" ;;
+            esac
+        done < "${AIAB_CONFIG_FILE}"
+    fi
+
+    # Environment variables take precedence over config file
+    if [ -n "$ENV_CONTAINER_RUNTIME" ]; then CONTAINER_RUNTIME="$ENV_CONTAINER_RUNTIME"; fi
+    if [ -n "$ENV_AIAB_KATA" ]; then AIAB_KATA="$ENV_AIAB_KATA"; fi
+    if [ -n "$ENV_AIAB_HYPERVISOR" ]; then AIAB_HYPERVISOR="$ENV_AIAB_HYPERVISOR"; fi
+    if [ -n "$ENV_KATA_RUNTIME" ]; then KATA_RUNTIME="$ENV_KATA_RUNTIME"; fi
+    if [ -n "$ENV_KVM_DEVICE" ]; then KVM_DEVICE="$ENV_KVM_DEVICE"; fi
+    if [ -n "$ENV_DEFAULT_MODEL" ]; then DEFAULT_MODEL="$ENV_DEFAULT_MODEL"; fi
+    if [ -n "$ENV_DEFAULT_EFFORT" ]; then DEFAULT_EFFORT="$ENV_DEFAULT_EFFORT"; fi
+}
+
+save_config() {
+    mkdir -p "${AIAB_CONFIG_DIR}"
+    cat << EOF > "${AIAB_CONFIG_FILE}"
+# agyInABasket (aiab) Configuration File
+# Automatically managed by 'aiab config'. You can also edit this file manually.
+
+# Enable Kata Containers KVM microVM isolation ('auto' = default if installed, '1' = force on, '0' = force off)
+AIAB_KATA="${AIAB_KATA}"
+
+# Preferred container engine ('auto', 'podman', or 'docker')
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME}"
+
+# Kata Containers runtime name or binary path
+KATA_RUNTIME="${KATA_RUNTIME}"
+
+# Default model forwarded to agy (empty for agy default)
+DEFAULT_MODEL="${DEFAULT_MODEL}"
+
+# Default reasoning effort forwarded to agy (empty, 'low', 'medium', 'high')
+DEFAULT_EFFORT="${DEFAULT_EFFORT}"
+EOF
+}
+
+# Locate Kata runtime binary across PATH and standard installation paths (/opt/kata, /usr/local/bin, /usr/bin)
+find_kata_binary() {
+    if [ -n "${KATA_RUNTIME}" ] && command -v "${KATA_RUNTIME}" >/dev/null 2>&1; then
+        command -v "${KATA_RUNTIME}"
+        return 0
+    elif [ -n "${KATA_RUNTIME}" ] && [ -x "${KATA_RUNTIME}" ]; then
+        echo "${KATA_RUNTIME}"
+        return 0
+    fi
+
+    local -a search_paths=()
+    local cv
+    cv="$(command -v kata-runtime 2>/dev/null || true)"
+    [ -n "$cv" ] && search_paths+=("$cv")
+    cv="$(command -v containerd-shim-kata-v2 2>/dev/null || true)"
+    [ -n "$cv" ] && search_paths+=("$cv")
+    search_paths+=(
+        "/opt/kata/bin/kata-runtime"
+        "/usr/local/bin/kata-runtime"
+        "/usr/bin/kata-runtime"
+        "/usr/local/bin/containerd-shim-kata-v2"
+        "/usr/bin/containerd-shim-kata-v2"
+        "/opt/kata/bin/containerd-shim-kata-v2"
+        "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2"
+    )
+
+    local standard_path
+    for standard_path in "${search_paths[@]}"; do
+        if [ -x "$standard_path" ]; then
+            echo "$standard_path"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Check if Kata Containers and hardware KVM are available on the host
+is_kata_available() {
+    if [ -e "${KVM_DEVICE}" ] && [ -r "${KVM_DEVICE}" ] && [ -w "${KVM_DEVICE}" ]; then
+        if find_kata_binary >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Load saved configuration
+load_config
 
 # Determine repository root directory if available (for rebuild/update)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,9 +174,12 @@ Usage:
   aiab [COMMAND]
 
 Commands:
+  version       Display aiab version
   update        Pull latest base image and rebuild container with newest agy CLI
   rebuild       Force clean rebuild of the container image without cache
   status        Display container image, volume sizes, and agy CLI version
+  check-kata    Verify host KVM support and Kata Containers runtime status
+  config        Manage persistent defaults interactively or via CLI
   clean         Prune stopped containers and dangling images
   backup-auth   Backup persistent auth tokens and conversations to a tar archive
   reset-auth    Reset persistent authentication (clears stored tokens and databases)
@@ -43,10 +188,20 @@ Commands:
 Arguments:
   DIRECTORY     Path to project directory (default: current directory '.')
   OPTIONS       Flags forwarded to agy (e.g., --continue, --model, --effort)
+  --kata / --hypervisor      Launch container enclosed in a Kata Containers KVM microVM
+  --no-kata / --no-hypervisor Run with standard container isolation (overrides config)
+  --dry-run     Print the container run command without executing it
+  --version / -V Display aiab version
   bash / sh     Launch an interactive bash shell inside the container instead of agy
 
 Examples:
   aiab                              # Launch agy in current directory
+  aiab --kata                       # Launch with hardware KVM microVM isolation
+  aiab ~/projects/my-app --kata     # Launch project enclosed in Kata microVM
+  aiab check-kata                   # Run hypervisor and KVM diagnostics
+  aiab config                       # Launch interactive configuration menu
+  aiab config show                  # View current persistent configuration
+  aiab config set AIAB_KATA 1       # Enable Kata microVM by default
   aiab update                       # Update container with the latest agy CLI release
   aiab status                       # Show container image and volume status
   aiab ~/projects/my-app            # Launch agy in specific project directory
@@ -54,16 +209,19 @@ Examples:
   aiab . bash                       # Open an interactive bash shell in the project container
 
 Configuration:
-  CONTAINER_RUNTIME Container engine to use: 'docker' or 'podman' (default: auto-detected)
-  AGY_IMAGE         Container image to run (default: agy-yolo:latest)
+  CONTAINER_RUNTIME Container engine to use: 'docker', 'podman', or 'auto' (default: auto)
+  AGY_IMAGE         Container image to run (default: agy-in-a-basket:latest)
   AGY_DATA_VOLUME   Container volume for persistent auth & tokens (default: agy-data)
   AGY_CONFIG_VOLUME Container volume for persistent configs (default: agy-config)
+  AIAB_KATA         Enable Kata Containers microVM hypervisor isolation by default (1/0)
+  KATA_RUNTIME      Kata runtime name or binary path (default: kata-runtime)
+  AIAB_CONFIG_FILE  Custom configuration file path (default: ~/.config/aiab/config)
 EOF
 }
 
 # Auto-detect container runtime if not explicitly specified
 detect_runtime() {
-    if [ -n "$CONTAINER_RUNTIME" ]; then
+    if [ -n "$CONTAINER_RUNTIME" ] && [ "$CONTAINER_RUNTIME" != "auto" ]; then
         if ! command -v "$CONTAINER_RUNTIME" >/dev/null 2>&1; then
             echo "❌ Error: Configured CONTAINER_RUNTIME='$CONTAINER_RUNTIME' not found in PATH." >&2
             exit 1
@@ -71,6 +229,9 @@ detect_runtime() {
         return 0
     fi
 
+    # Precedence: Podman is preferred by default for rootless, unprivileged isolation.
+    # Note: If Kata microVM isolation is requested (--kata), aiab will automatically
+    # route execution to Docker since modern Kata Containers requires containerd shimv2.
     if command -v podman >/dev/null 2>&1; then
         CONTAINER_RUNTIME="podman"
     elif command -v docker >/dev/null 2>&1; then
@@ -98,6 +259,46 @@ check_runtime() {
     fi
 }
 
+# Return array of operational runtimes. If CONTAINER_RUNTIME is specifically set to docker or podman, return just that.
+# If unset or 'auto', return all functional runtimes.
+get_operational_runtimes() {
+    local target="${CONTAINER_RUNTIME:-auto}"
+    local -a rts=()
+
+    if [ "$target" = "docker" ]; then
+        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            echo "docker"
+            return 0
+        else
+            echo "❌ Error: Configured runtime 'docker' is not available or daemon is not running." >&2
+            return 1
+        fi
+    elif [ "$target" = "podman" ]; then
+        if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+            echo "podman"
+            return 0
+        else
+            echo "❌ Error: Configured runtime 'podman' is not available or 'podman info' failed." >&2
+            return 1
+        fi
+    else
+        # Auto mode: probe all functional runtimes
+        if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+            rts+=("podman")
+        fi
+        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            rts+=("docker")
+        fi
+
+        if [ "${#rts[@]}" -eq 0 ]; then
+            echo "❌ Error: Neither Podman nor Docker is running or accessible." >&2
+            return 1
+        fi
+        echo "${rts[*]}"
+        return 0
+    fi
+}
+
 find_repo_dir() {
     if [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/Dockerfile" ]; then
         echo "$REPO_DIR"
@@ -114,9 +315,9 @@ find_repo_dir() {
     echo ""
 }
 
-# Subcommand: update
-cmd_update() {
-    check_runtime
+# Helper: build or rebuild container image across operational runtime(s)
+_build_image() {
+    local pull_base="${1:-0}"
     local repo
     repo="$(find_repo_dir)"
     if [ -z "$repo" ]; then
@@ -124,95 +325,578 @@ cmd_update() {
         exit 1
     fi
 
+    local -a targets
+    IFS=' ' read -r -a targets <<< "$(get_operational_runtimes)"
+
     local host_uid host_gid
     host_uid="$(id -u)"
     host_gid="$(id -g)"
 
-    echo "🔄 Pulling latest base image and updating agy CLI via ${CONTAINER_RUNTIME}..."
-    "$CONTAINER_RUNTIME" pull ubuntu:24.04
-    "$CONTAINER_RUNTIME" build \
-        --no-cache \
-        --build-arg USER_UID="${host_uid}" \
-        --build-arg USER_GID="${host_gid}" \
-        -t "${AGY_IMAGE}" \
-        -t "${BASKET_TAG}" \
-        "$repo"
+    for rt in "${targets[@]}"; do
+        echo "🔨 Building container image via ${rt}..."
+        if [ "$pull_base" = "1" ]; then
+            "$rt" pull ubuntu:24.04 || true
+        fi
 
+        "$rt" build \
+            --no-cache \
+            --build-arg USER_UID="${host_uid}" \
+            --build-arg USER_GID="${host_gid}" \
+            --build-arg USER_NAME="${CONTAINER_USER}" \
+            -t "${AGY_IMAGE}" \
+            "$repo"
+        echo "✓ Image built successfully in ${rt}"
+    done
+}
+
+# Subcommand: update
+cmd_update() {
+    echo "🔄 Pulling latest base image and updating agy CLI..."
+    _build_image 1
     echo "✓ Update complete! aiab is now running the latest container image."
 }
 
 # Subcommand: rebuild
 cmd_rebuild() {
-    check_runtime
-    local repo
-    repo="$(find_repo_dir)"
-    if [ -z "$repo" ]; then
-        echo "❌ Error: Could not locate agyInABasket repository containing Dockerfile." >&2
-        exit 1
-    fi
-
-    local host_uid host_gid
-    host_uid="$(id -u)"
-    host_gid="$(id -g)"
-
-    echo "🔨 Forcing clean rebuild without cache via ${CONTAINER_RUNTIME}..."
-    "$CONTAINER_RUNTIME" build \
-        --no-cache \
-        --build-arg USER_UID="${host_uid}" \
-        --build-arg USER_GID="${host_gid}" \
-        -t "${AGY_IMAGE}" \
-        -t "${BASKET_TAG}" \
-        "$repo"
-
+    echo "🔨 Forcing clean rebuild without cache..."
+    _build_image 0
     echo "✓ Rebuild complete!"
 }
 
 # Subcommand: status
 cmd_status() {
-    check_runtime
-    echo "=== agyInABasket (aiab) Status [Runtime: ${CONTAINER_RUNTIME}] ==="
+    local -a targets
+    if ! targets_str="$(get_operational_runtimes 2>/dev/null)"; then
+        check_runtime
+    fi
+    IFS=' ' read -r -a targets <<< "$targets_str"
+
+    echo "=== agyInABasket (aiab) Status ==="
+    echo "Operational Runtime(s): ${targets[*]}"
     echo ""
-    echo "--- Container Image ---"
-    "$CONTAINER_RUNTIME" images "${AGY_IMAGE}" --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}"
+
+    for rt in "${targets[@]}"; do
+        echo "=========================================================="
+        echo "  Engine: ${rt}"
+        echo "=========================================================="
+        echo "--- Container Image ---"
+        if "$rt" image inspect "${AGY_IMAGE}" >/dev/null 2>&1; then
+            "$rt" images "${AGY_IMAGE}" --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}"
+        else
+            echo "⚠️ Image '${AGY_IMAGE}' not found in ${rt}. Run 'aiab rebuild' or install.sh."
+        fi
+        echo ""
+        echo "--- Persistent Volumes ---"
+        "$rt" volume ls --filter "name=agy-"
+        echo ""
+        echo "--- agy CLI Version (inside container) ---"
+        if "$rt" image inspect "${AGY_IMAGE}" >/dev/null 2>&1; then
+            "$rt" run --rm "${AGY_IMAGE}" bash -c \
+                "agy --version 2>/dev/null || agy version 2>/dev/null || agy changelog 2>/dev/null | head -n 3" \
+                || echo "Version check unavailable."
+        else
+            echo "Cannot check version: image not found."
+        fi
+        echo ""
+    done
+
+    echo "--- Hypervisor Isolation (Kata Containers) ---"
+    if [ -e "${KVM_DEVICE}" ]; then
+        if [ -r "${KVM_DEVICE}" ] && [ -w "${KVM_DEVICE}" ]; then
+            echo "Hardware KVM: Available & Accessible (${KVM_DEVICE})"
+        else
+            echo "Hardware KVM: Present (${KVM_DEVICE}), permissions needed: sudo usermod -aG kvm \$USER"
+        fi
+    else
+        echo "Hardware KVM: Not detected (enable virtualization in BIOS/UEFI)"
+    fi
+    local kata_bin_status
+    if kata_bin_status="$(find_kata_binary 2>/dev/null)" && [ -n "$kata_bin_status" ]; then
+        echo "Kata Runtime: Installed (${kata_bin_status})"
+    else
+        echo "Kata Runtime: Not installed (run 'aiab check-kata' for install details)"
+    fi
+    if [ "${AIAB_KATA}" = "1" ]; then
+        echo "Isolation Mode: Force Kata MicroVM (configured)"
+    elif [ "${AIAB_KATA}" = "0" ]; then
+        echo "Isolation Mode: Standard Container (configured)"
+    else
+        if is_kata_available; then
+            echo "Isolation Mode: Auto (active: Kata MicroVM)"
+        else
+            echo "Isolation Mode: Auto (active: Standard Container)"
+        fi
+    fi
     echo ""
-    echo "--- Persistent Volumes ---"
-    "$CONTAINER_RUNTIME" volume ls --filter "name=agy-"
+}
+
+# Subcommand: check-kata
+cmd_check_kata() {
+    echo "=========================================================="
+    echo "     Kata Containers & KVM Hypervisor Diagnostic         "
+    echo "=========================================================="
     echo ""
-    echo "--- agy CLI Version (inside container) ---"
-    "$CONTAINER_RUNTIME" run --rm "${AGY_IMAGE}" agy changelog 2>/dev/null | head -n 10 || echo "Version check unavailable."
+    local all_good=true
+
+    # 1. Check KVM device
+    echo "1. Checking hardware virtualization (${KVM_DEVICE})..."
+    if [ -e "${KVM_DEVICE}" ]; then
+        if [ -r "${KVM_DEVICE}" ] && [ -w "${KVM_DEVICE}" ]; then
+            echo "   ✓ ${KVM_DEVICE} exists and is accessible by current user."
+        else
+            echo "   ⚠️ ${KVM_DEVICE} exists, but current user lacks read/write permissions."
+            echo "      Fix by running: sudo usermod -aG kvm \$USER && newgrp kvm"
+            all_good=false
+        fi
+    else
+        echo "   ❌ ${KVM_DEVICE} not found."
+        echo "      Ensure CPU virtualization (Intel VT-x or AMD-V) is enabled in your BIOS/UEFI."
+        all_good=false
+    fi
+    echo ""
+
+    # 2. Check kernel acceleration modules
+    echo "2. Checking kernel acceleration modules (vhost, vhost_net, vhost_vsock)..."
+    local missing_mods=()
+    local kmod
+    local module_interface_available=false
+    if [ -f /proc/modules ] || [ -d /sys/module ]; then
+        module_interface_available=true
+    fi
+
+    for kmod in vhost vhost_net vhost_vsock; do
+        # Check /sys/module (built-in or loaded), /proc/modules, and lsmod
+        if [ -d "/sys/module/${kmod}" ]; then
+            continue
+        elif [ -f /proc/modules ] && grep -qw "$kmod" /proc/modules 2>/dev/null; then
+            continue
+        elif command -v lsmod >/dev/null 2>&1 && lsmod 2>/dev/null | grep -qw "$kmod"; then
+            continue
+        fi
+        missing_mods+=("$kmod")
+    done
+
+    if [ "$module_interface_available" = false ]; then
+        echo "   ⚠️ Notice: Kernel module interface (/proc/modules, /sys/module) is not accessible."
+        echo "      Could not verify hardware acceleration modules."
+    elif [ "${#missing_mods[@]}" -eq 0 ]; then
+        echo "   ✓ Acceleration kernel modules are loaded or built-in (vhost, vhost_net, vhost_vsock)."
+    else
+        echo "   ⚠️ Missing loaded kernel modules: ${missing_mods[*]}"
+        echo "      To load them now:"
+        echo "        sudo modprobe ${missing_mods[*]}"
+        echo "      To load them automatically on boot:"
+        printf "        printf '%%s\\n' %s | sudo tee -a /etc/modules-load.d/kata.conf\n" "${missing_mods[*]}"
+    fi
+    echo ""
+
+    # 3. Check Kata runtime binary
+    echo "3. Checking Kata Containers installation..."
+    local kata_bin=""
+    kata_bin="$(find_kata_binary 2>/dev/null || true)"
+
+    if [ -n "$kata_bin" ]; then
+        echo "   ✓ kata-runtime found at: $kata_bin"
+        if "$kata_bin" kata-check >/dev/null 2>&1; then
+            echo "   ✓ 'kata-runtime kata-check' passed successfully."
+        else
+            echo "   ℹ️ Note: 'kata-runtime kata-check' reported host warnings or non-zero exit."
+        fi
+    else
+        echo "   ❌ kata-runtime is not installed on the host."
+        echo "      To install Kata Containers on Linux Mint / Ubuntu:"
+        echo "        Run the automated installer: ./scripts/install-kata.sh"
+        echo "        Or install the official static release tarball into /opt/kata:"
+        echo "        https://github.com/kata-containers/kata-containers/releases"
+        all_good=false
+    fi
+    echo ""
+
+    # 4. Check Container runtime integration
+    echo "4. Checking container runtime configuration..."
+    local runtime_found=""
+    if [ -n "$CONTAINER_RUNTIME" ] && command -v "$CONTAINER_RUNTIME" >/dev/null 2>&1; then
+        runtime_found="$CONTAINER_RUNTIME"
+    elif command -v podman >/dev/null 2>&1; then
+        runtime_found="podman"
+    elif command -v docker >/dev/null 2>&1; then
+        runtime_found="docker"
+    fi
+
+    if [ -z "$runtime_found" ]; then
+        echo "   ❌ Neither Podman nor Docker was found in PATH."
+        all_good=false
+    else
+        echo "   Detected container engine: ${runtime_found}"
+        if [ "$runtime_found" = "docker" ]; then
+            if docker info 2>/dev/null | grep -qi "kata-runtime"; then
+                echo "   ✓ Kata runtime is registered in Docker daemon."
+            elif command -v containerd-shim-kata-v2 >/dev/null 2>&1 || [ -x "/usr/local/bin/containerd-shim-kata-v2" ] || [ -x "/usr/bin/containerd-shim-kata-v2" ] || [ -x "/opt/kata/bin/containerd-shim-kata-v2" ] || [ -x "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" ]; then
+                echo "   ✓ containerd-shim-kata-v2 detected in PATH."
+                echo "     Docker will run Kata microVMs via containerd shim: io.containerd.kata.v2"
+            else
+                echo "   ℹ️ Docker is active, but containerd-shim-kata-v2 is not yet in PATH."
+            fi
+        elif [ "$runtime_found" = "podman" ]; then
+            echo "   ⚠️ Podman detected: Podman does NOT support Kata Containers."
+            echo "      Kata Containers requires containerd's shimv2 protocol, which is supported by Docker."
+            if command -v docker >/dev/null 2>&1; then
+                echo "      ✓ Docker is installed! aiab will route Kata microVM runs to Docker automatically,"
+                echo "        or you can set Docker as preferred: aiab config set CONTAINER_RUNTIME docker"
+            else
+                echo "      To run Kata microVMs, please install Docker: sudo apt-get install -y docker.io"
+                echo "      To run with Podman, use standard container isolation: aiab --no-kata"
+                all_good=false
+            fi
+        fi
+    fi
+    echo ""
+
+    if [ "$all_good" = true ]; then
+        echo "🎉 System is ready! You can launch with hypervisor isolation using:"
+        echo "   aiab --kata"
+        echo "   or: AIAB_KATA=1 aiab"
+        echo "=========================================================="
+        return 0
+    else
+        echo "⚠️  Please address the items above before running aiab with --kata."
+        echo "=========================================================="
+        return 1
+    fi
+}
+
+# Interactive Configuration Menu
+interactive_config_menu() {
+    while true; do
+        echo ""
+        echo "=========================================================="
+        echo "           agyInABasket (aiab) Settings Menu              "
+        echo "=========================================================="
+        echo "Config file: ${AIAB_CONFIG_FILE}"
+        echo ""
+        local kata_label="[Auto: Disabled (Kata not detected)]"
+        if [ "${AIAB_KATA}" = "1" ]; then
+            kata_label="[Always Enabled (KVM MicroVM)]"
+        elif [ "${AIAB_KATA}" = "0" ]; then
+            kata_label="[Always Disabled (Standard Container)]"
+        else
+            if is_kata_available; then
+                kata_label="[Auto: Enabled (Kata microVM detected)]"
+            else
+                kata_label="[Auto: Disabled (Kata not detected)]"
+            fi
+        fi
+        local engine_label="${CONTAINER_RUNTIME:-auto}"
+        local model_label="${DEFAULT_MODEL:-<none>}"
+        local effort_label="${DEFAULT_EFFORT:-<none>}"
+
+        echo "  1) Hypervisor Isolation (Kata):  $kata_label"
+        echo "  2) Default Container Engine:     [$engine_label]"
+        echo "  3) Kata Runtime Identifier:      [${KATA_RUNTIME:-kata-runtime}]"
+        echo "  4) Default Model:                [$model_label]"
+        echo "  5) Default Effort:               [$effort_label]"
+        echo "  6) Run Diagnostics (check-kata)"
+        echo "  r) Reset all to defaults"
+        echo "  q) Quit / Exit"
+        echo "=========================================================="
+        read -rp "Select an option (1-6, r, q): " choice
+
+        case "$choice" in
+            1)
+                echo ""
+                echo "Select Hypervisor Isolation Mode:"
+                echo "  1) auto  - Enable Kata microVM automatically if installed, else standard container (Default)"
+                echo "  2) force - Always require Kata microVM (fails if missing)"
+                echo "  3) off   - Always run in standard container"
+                read -rp "Choice (1-3): " kata_choice
+                case "$kata_choice" in
+                    1) AIAB_KATA="auto"; echo "✓ Hypervisor isolation set to auto-detect." ;;
+                    2) AIAB_KATA="1"; echo "✓ Hypervisor isolation set to always enabled." ;;
+                    3) AIAB_KATA="0"; echo "✓ Hypervisor isolation set to always disabled." ;;
+                    *) echo "Invalid choice." ;;
+                esac
+                save_config
+                ;;
+            2)
+                echo ""
+                echo "Select preferred container engine:"
+                echo "  1) auto (prefer Podman if available, then Docker)"
+                echo "  2) podman"
+                echo "  3) docker"
+                read -rp "Choice (1-3): " eng_choice
+                case "$eng_choice" in
+                    1) CONTAINER_RUNTIME="auto" ;;
+                    2) CONTAINER_RUNTIME="podman" ;;
+                    3) CONTAINER_RUNTIME="docker" ;;
+                    *) echo "Invalid choice." ;;
+                esac
+                save_config
+                ;;
+            3)
+                read -rp "Enter Kata runtime identifier (default: kata-runtime): " kr
+                if [ -n "$kr" ]; then
+                    KATA_RUNTIME="$kr"
+                    save_config
+                fi
+                ;;
+            4)
+                read -rp "Enter default model (e.g. 'Gemini 2.5 Pro', or press enter to clear): " dm
+                DEFAULT_MODEL="$dm"
+                save_config
+                ;;
+            5)
+                echo "Select default reasoning effort:"
+                echo "  1) low"
+                echo "  2) medium"
+                echo "  3) high"
+                echo "  4) none (clear)"
+                read -rp "Choice (1-4): " eff_choice
+                case "$eff_choice" in
+                    1) DEFAULT_EFFORT="low" ;;
+                    2) DEFAULT_EFFORT="medium" ;;
+                    3) DEFAULT_EFFORT="high" ;;
+                    4) DEFAULT_EFFORT="" ;;
+                    *) echo "Invalid choice." ;;
+                esac
+                save_config
+                ;;
+            6)
+                echo ""
+                cmd_check_kata || true
+                ;;
+            r|R)
+                read -rp "Are you sure you want to reset all settings to defaults? (y/N) " confirm_reset
+                if [[ "$confirm_reset" =~ ^[Yy]$ ]]; then
+                    AIAB_KATA="auto"
+                    CONTAINER_RUNTIME="auto"
+                    KATA_RUNTIME="kata-runtime"
+                    DEFAULT_MODEL=""
+                    DEFAULT_EFFORT=""
+                    save_config
+                    echo "✓ Configuration reset to defaults."
+                fi
+                ;;
+            q|Q)
+                echo "Exiting configuration menu."
+                break
+                ;;
+            *)
+                echo "Invalid selection."
+                ;;
+        esac
+    done
+}
+
+# Subcommand: config
+cmd_config() {
+    local action="${1:-}"
+    shift 2>/dev/null || true
+
+    case "$action" in
+        show|list)
+            echo "=== agyInABasket Configuration ==="
+            echo "Config file: ${AIAB_CONFIG_FILE}"
+            echo ""
+            local kata_desc="[Auto-detect]"
+            if [ "${AIAB_KATA}" = "1" ]; then
+                kata_desc="[Always Enabled (KVM MicroVM)]"
+            elif [ "${AIAB_KATA}" = "0" ]; then
+                kata_desc="[Always Disabled (Standard Container)]"
+            else
+                if is_kata_available; then
+                    kata_desc="[Auto: Enabled (Kata microVM detected)]"
+                else
+                    kata_desc="[Auto: Disabled (Kata not detected)]"
+                fi
+            fi
+            echo "  AIAB_KATA:         ${AIAB_KATA:-auto} ${kata_desc}"
+            echo "  CONTAINER_RUNTIME: ${CONTAINER_RUNTIME:-auto}"
+            echo "  KATA_RUNTIME:      ${KATA_RUNTIME:-kata-runtime}"
+            echo "  DEFAULT_MODEL:     ${DEFAULT_MODEL:-<none>}"
+            echo "  DEFAULT_EFFORT:    ${DEFAULT_EFFORT:-<none>}"
+            echo ""
+            return 0
+            ;;
+        get)
+            local key="${1:-}"
+            if [ -z "$key" ]; then
+                echo "Usage: aiab config get <KEY>" >&2
+                return 1
+            fi
+            case "$key" in
+                AIAB_KATA)          echo "${AIAB_KATA:-auto}" ;;
+                CONTAINER_RUNTIME)  echo "${CONTAINER_RUNTIME:-auto}" ;;
+                KATA_RUNTIME)       echo "${KATA_RUNTIME:-kata-runtime}" ;;
+                DEFAULT_MODEL)      echo "${DEFAULT_MODEL:-}" ;;
+                DEFAULT_EFFORT)     echo "${DEFAULT_EFFORT:-}" ;;
+                *) echo "Unknown config key: $key" >&2; return 1 ;;
+            esac
+            return 0
+            ;;
+        set)
+            local key="${1:-}"
+            local val="${2:-}"
+            if [ -z "$key" ]; then
+                echo "Usage: aiab config set <KEY> <VALUE>" >&2
+                return 1
+            fi
+            case "$key" in
+                AIAB_KATA)
+                    if [ "$val" != "0" ] && [ "$val" != "1" ] && [ "$val" != "auto" ]; then
+                        echo "❌ Error: AIAB_KATA must be 'auto', '1' (always enable), or '0' (always disable)." >&2
+                        return 1
+                    fi
+                    AIAB_KATA="$val"
+                    ;;
+                CONTAINER_RUNTIME)
+                    if [ "$val" != "auto" ] && [ "$val" != "podman" ] && [ "$val" != "docker" ]; then
+                        echo "❌ Error: CONTAINER_RUNTIME must be 'auto', 'podman', or 'docker'." >&2
+                        return 1
+                    fi
+                    CONTAINER_RUNTIME="$val"
+                    ;;
+                KATA_RUNTIME)
+                    KATA_RUNTIME="$val"
+                    ;;
+                DEFAULT_MODEL)
+                    DEFAULT_MODEL="$val"
+                    ;;
+                DEFAULT_EFFORT)
+                    DEFAULT_EFFORT="$val"
+                    ;;
+                *)
+                    echo "❌ Unknown config key: $key" >&2
+                    return 1
+                    ;;
+            esac
+            save_config
+            echo "✓ Saved ${key}=\"${val}\" to ${AIAB_CONFIG_FILE}"
+            return 0
+            ;;
+        reset)
+            AIAB_KATA="auto"
+            CONTAINER_RUNTIME="auto"
+            KATA_RUNTIME="kata-runtime"
+            DEFAULT_MODEL=""
+            DEFAULT_EFFORT=""
+            save_config
+            echo "✓ Reset configuration to defaults in ${AIAB_CONFIG_FILE}"
+            return 0
+            ;;
+        -h|--help|help)
+            echo "Usage: aiab config [COMMAND] [ARGS...]"
+            echo ""
+            echo "Commands:"
+            echo "  (none)                    Launch interactive configuration menu"
+            echo "  show / list               Display current configuration settings"
+            echo "  get <KEY>                 Print the value of a configuration key"
+            echo "  set <KEY> <VALUE>         Set a configuration key to a value"
+            echo "  reset                     Reset configuration to defaults"
+            return 0
+            ;;
+        "")
+            if [ -t 0 ]; then
+                interactive_config_menu
+            else
+                cmd_config show
+            fi
+            return 0
+            ;;
+        *)
+            echo "❌ Error: Unknown config command '$action'." >&2
+            echo "Run 'aiab config --help' for usage." >&2
+            return 1
+            ;;
+    esac
 }
 
 # Subcommand: clean
 cmd_clean() {
-    check_runtime
-    echo "🧹 Pruning stopped containers and dangling images via ${CONTAINER_RUNTIME}..."
-    "$CONTAINER_RUNTIME" ps -a --filter "name=agy-" --filter "status=exited" -q | xargs -r "$CONTAINER_RUNTIME" rm 2>/dev/null || true
-    "$CONTAINER_RUNTIME" image prune -f
+    local -a targets
+    if ! targets_str="$(get_operational_runtimes 2>/dev/null)"; then
+        check_runtime
+        targets=("$CONTAINER_RUNTIME")
+    else
+        IFS=' ' read -r -a targets <<< "$targets_str"
+    fi
+
+    echo "🧹 Pruning stopped agy containers and dangling aiab images across: ${targets[*]}..."
+    for rt in "${targets[@]}"; do
+        echo "  [${rt}] Pruning stopped containers..."
+        local stopped_containers
+        stopped_containers="$("$rt" ps -a --filter "name=agy-" --filter "status=exited" -q 2>/dev/null || true)"
+        if [ -n "$stopped_containers" ]; then
+            echo "$stopped_containers" | xargs "$rt" rm 2>/dev/null || true
+        fi
+        echo "  [${rt}] Pruning dangling images..."
+        "$rt" image prune -f --filter "label=org.aiab.managed=true" 2>/dev/null || true
+    done
+    echo "✓ Cleanup finished across all operational runtimes!"
     echo "✓ Cleanup finished!"
 }
 
 # Subcommand: backup-auth
 cmd_backup_auth() {
-    check_runtime
-    local backup_file="${HOME}/agy-auth-backup-$(date +%Y%m%d_%H%M%S).tar.gz"
-    echo "💾 Backing up ${AGY_DATA_VOLUME} to ${backup_file}..."
-    "$CONTAINER_RUNTIME" run --rm \
-        -v "${AGY_DATA_VOLUME}:/data:ro" \
-        -v "${HOME}:/backup" \
-        busybox tar -czf "/backup/$(basename "${backup_file}")" -C /data .
-    echo "✓ Backup created at: ${backup_file}"
+    local -a targets
+    if ! targets_str="$(get_operational_runtimes 2>/dev/null)"; then
+        check_runtime
+        targets=("$CONTAINER_RUNTIME")
+    else
+        IFS=' ' read -r -a targets <<< "$targets_str"
+    fi
+
+    local timestamp
+    timestamp="$(date +%Y%m%d_%H%M%S)"
+
+    for rt in "${targets[@]}"; do
+        local backup_file="${HOME}/agy-auth-backup-${rt}-${timestamp}.tar.gz"
+        local backup_dir
+        backup_dir="$(dirname "${backup_file}")"
+
+        if ! "$rt" volume inspect "${AGY_DATA_VOLUME}" >/dev/null 2>&1; then
+            echo "ℹ️ Volume '${AGY_DATA_VOLUME}' does not exist in ${rt}, skipping."
+            continue
+        fi
+
+        echo "💾 Backing up ${AGY_DATA_VOLUME} (${rt}) to ${backup_file}..."
+        if "$rt" image inspect "${AGY_IMAGE}" >/dev/null 2>&1; then
+            "$rt" run --rm \
+                -v "${AGY_DATA_VOLUME}:/data:ro" \
+                -v "${backup_dir}:/backup" \
+                "${AGY_IMAGE}" tar -czf "/backup/$(basename "${backup_file}")" -C /data .
+            echo "✓ Backup created at: ${backup_file}"
+        else
+            echo "⚠️ Warning: Image '${AGY_IMAGE}' not found in ${rt}. Cannot create backup container." >&2
+        fi
+    done
 }
 
 # Subcommand: reset-auth
 cmd_reset_auth() {
-    check_runtime
-    read -rp "⚠️ Are you sure you want to reset persistent auth data? You will need to log into Antigravity again. (y/N) " confirm
+    local -a targets
+    if ! targets_str="$(get_operational_runtimes 2>/dev/null)"; then
+        check_runtime
+        targets=("$CONTAINER_RUNTIME")
+    else
+        IFS=' ' read -r -a targets <<< "$targets_str"
+    fi
+
+    read -rp "⚠️ Are you sure you want to reset persistent auth data across all detected engines (${targets[*]})? You will need to log into Antigravity again. (y/N) " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        echo "🗑️ Resetting ${AGY_DATA_VOLUME} and ${AGY_CONFIG_VOLUME}..."
-        "$CONTAINER_RUNTIME" volume rm -f "${AGY_DATA_VOLUME}" "${AGY_CONFIG_VOLUME}" 2>/dev/null || true
-        "$CONTAINER_RUNTIME" volume create "${AGY_DATA_VOLUME}" >/dev/null
-        "$CONTAINER_RUNTIME" volume create "${AGY_CONFIG_VOLUME}" >/dev/null
-        echo "✓ Auth reset. Fresh volumes created."
+        for rt in "${targets[@]}"; do
+            echo "🗑️ Resetting ${AGY_DATA_VOLUME} and ${AGY_CONFIG_VOLUME} in ${rt}..."
+            if ! "$rt" volume rm -f "${AGY_DATA_VOLUME}" "${AGY_CONFIG_VOLUME}" 2>/dev/null; then
+                echo "⚠️ Warning: Failed to remove one or more volumes in ${rt} (they may be in use by a running container)." >&2
+            fi
+            if ! "$rt" volume create "${AGY_DATA_VOLUME}" >/dev/null; then
+                echo "❌ Error: Failed to recreate persistent volume '${AGY_DATA_VOLUME}' in ${rt}." >&2
+            fi
+            if ! "$rt" volume create "${AGY_CONFIG_VOLUME}" >/dev/null; then
+                echo "❌ Error: Failed to recreate persistent volume '${AGY_CONFIG_VOLUME}' in ${rt}." >&2
+            fi
+            echo "✓ Volumes reset in ${rt}."
+        done
+        echo "✓ Auth reset complete. Fresh volumes created across: ${targets[*]}."
     else
         echo "Operation cancelled."
     fi
@@ -220,20 +904,36 @@ cmd_reset_auth() {
 
 # Subcommand: uninstall
 cmd_uninstall() {
-    check_runtime
-    read -rp "⚠️ This will delete the agy-yolo container images and wrappers from ~/.local/bin. Proceed? (y/N) " confirm
+    local -a targets
+    if ! targets_str="$(get_operational_runtimes 2>/dev/null)"; then
+        check_runtime
+        targets=("$CONTAINER_RUNTIME")
+    else
+        IFS=' ' read -r -a targets <<< "$targets_str"
+    fi
+
+    read -rp "⚠️ This will delete the agy-in-a-basket container image from all detected engines (${targets[*]}) and host wrappers from ~/.local/bin. Proceed? (y/N) " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         rm -f "${HOME}/.local/bin/aiab"
-        "$CONTAINER_RUNTIME" rmi -f "${AGY_IMAGE}" "${BASKET_TAG}" 2>/dev/null || true
-        echo "✓ Binary and images removed. Persistent volumes ('${AGY_DATA_VOLUME}') were kept intact."
+        for rt in "${targets[@]}"; do
+            echo "🗑️ Removing '${AGY_IMAGE}' from ${rt}..."
+            "$rt" rmi -f "${AGY_IMAGE}" 2>/dev/null || true
+            echo "✓ Image removed from ${rt}."
+        done
+        echo "✓ Binary and image(s) removed. Persistent volumes ('${AGY_DATA_VOLUME}') were kept intact."
     else
         echo "Uninstall cancelled."
     fi
 }
 
-# Check for help flag
+# Check for help or version flags
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
     show_help
+    exit 0
+fi
+
+if [ "${1:-}" = "version" ] || [ "${1:-}" = "--version" ] || [ "${1:-}" = "-V" ]; then
+    echo "aiab version ${AIAB_VERSION}"
     exit 0
 fi
 
@@ -242,6 +942,8 @@ case "${1:-}" in
     update)       cmd_update; exit 0 ;;
     rebuild)      cmd_rebuild; exit 0 ;;
     status)       cmd_status; exit 0 ;;
+    check-kata)   cmd_check_kata; exit 0 ;;
+    config)       shift; cmd_config "$@"; exit 0 ;;
     clean)        cmd_clean; exit 0 ;;
     backup-auth)  cmd_backup_auth; exit 0 ;;
     reset-auth)   cmd_reset_auth; exit 0 ;;
@@ -250,19 +952,74 @@ esac
 
 check_runtime
 
-# Determine target workspace directory
+# Initialize Kata configuration from environment / config file
+KATA_MODE="${AIAB_KATA:-auto}"
+if [ "${AIAB_HYPERVISOR:-}" = "kata" ]; then
+    KATA_MODE="1"
+fi
+
+CLI_KATA_OVERRIDE=""
+AIAB_DRY_RUN="${ENV_AIAB_DRY_RUN:-0}"
+
+# Parse arguments: extract target directory, flags, and forwarded options
+RAW_ARGS=("$@")
+FILTERED_ARGS=()
 TARGET_DIR="."
-if [ $# -gt 0 ]; then
-    if [ -d "$1" ]; then
-        TARGET_DIR="$1"
-        shift
-    elif [[ "$1" != -* && "$1" != "bash" && "$1" != "sh" ]]; then
-        if [ ! -e "$1" ]; then
-            echo "❌ Error: Directory does not exist: $1" >&2
-            exit 1
-        fi
-        TARGET_DIR="$1"
-        shift
+TARGET_DIR_SET=false
+
+for arg in "${RAW_ARGS[@]}"; do
+    case "$arg" in
+        --kata|--hypervisor)
+            CLI_KATA_OVERRIDE="1"
+            ;;
+        --no-kata|--no-hypervisor)
+            CLI_KATA_OVERRIDE="0"
+            ;;
+        --dry-run)
+            AIAB_DRY_RUN="1"
+            ;;
+        --version|-V)
+            echo "aiab version ${AIAB_VERSION}"
+            exit 0
+            ;;
+        --model=*)
+            FILTERED_ARGS+=("--model" "${arg#*=}")
+            ;;
+        --effort=*)
+            FILTERED_ARGS+=("--effort" "${arg#*=}")
+            ;;
+        *)
+            if [ "$TARGET_DIR_SET" = false ] && [ -d "$arg" ]; then
+                TARGET_DIR="$arg"
+                TARGET_DIR_SET=true
+            elif [ "$TARGET_DIR_SET" = false ] && [[ "$arg" != -* && "$arg" != "bash" && "$arg" != "sh" ]]; then
+                if [ ! -e "$arg" ]; then
+                    echo "❌ Error: Directory does not exist: $arg" >&2
+                    exit 1
+                fi
+                TARGET_DIR="$arg"
+                TARGET_DIR_SET=true
+            else
+                FILTERED_ARGS+=("$arg")
+            fi
+            ;;
+    esac
+done
+
+# Resolve USE_KATA
+USE_KATA=0
+if [ -n "$CLI_KATA_OVERRIDE" ]; then
+    USE_KATA="$CLI_KATA_OVERRIDE"
+elif [ "$KATA_MODE" = "1" ]; then
+    USE_KATA=1
+elif [ "$KATA_MODE" = "0" ]; then
+    USE_KATA=0
+else
+    # Auto-detection mode (default): default to Kata if installed and KVM is accessible
+    if is_kata_available; then
+        USE_KATA=1
+    else
+        USE_KATA=0
     fi
 fi
 
@@ -273,16 +1030,30 @@ if [ ! -d "$TARGET_DIR" ]; then
     exit 1
 fi
 
-# Check if image exists; if agy-yolo doesn't exist, try agy-basket:latest
-if ! "$CONTAINER_RUNTIME" image inspect "$AGY_IMAGE" >/dev/null 2>&1; then
-    if "$CONTAINER_RUNTIME" image inspect "${BASKET_TAG}" >/dev/null 2>&1; then
-        AGY_IMAGE="${BASKET_TAG}"
+# Podman does not support Kata Containers (requires containerd shimv2)
+if [ "$USE_KATA" = "1" ] && [ "$CONTAINER_RUNTIME" = "podman" ]; then
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        echo "ℹ️ Note: Podman does not support Kata Containers (shimv2 protocol required)."
+        echo "   Automatically switching to Docker for microVM isolation..."
+        CONTAINER_RUNTIME="docker"
     else
-        echo "❌ Error: Container image '$AGY_IMAGE' not found in ${CONTAINER_RUNTIME}." >&2
-        echo "Please build the image first by running:" >&2
-        echo "  ./scripts/install.sh" >&2
+        echo "❌ Error: Podman does not support Kata Containers." >&2
+        echo "   Kata Containers requires a containerd-based engine (such as Docker) using the shimv2 protocol." >&2
+        echo "   Podman attempts to invoke Kata via legacy OCI commands, which fails with: Invalid command \"create\"." >&2
+        echo "" >&2
+        echo "   To resolve:" >&2
+        echo "   1. If Docker is installed, start Docker and run: CONTAINER_RUNTIME=docker aiab" >&2
+        echo "   2. Or run standard container isolation with Podman: aiab --no-kata" >&2
         exit 1
     fi
+fi
+
+# Check if container image exists
+if ! "$CONTAINER_RUNTIME" image inspect "$AGY_IMAGE" >/dev/null 2>&1; then
+    echo "❌ Error: Container image '$AGY_IMAGE' not found in ${CONTAINER_RUNTIME}." >&2
+    echo "Please build the image first by running:" >&2
+    echo "  ./scripts/install.sh" >&2
+    exit 1
 fi
 
 # Ensure persistent volumes exist
@@ -302,17 +1073,72 @@ if [ "$CONTAINER_RUNTIME" = "podman" ]; then
     VOLUME_SUFFIX=":Z"
 fi
 
-# Generate session container name based on directory basename and PID
-SESSION_NAME="agy-$(basename "$TARGET_DIR" | tr -c 'a-zA-Z0-9_' '_')-$$"
+# Hypervisor (Kata Containers) validation and configuration
+if [ "$USE_KATA" = "1" ]; then
+    if [ ! -e "${KVM_DEVICE}" ]; then
+        echo "❌ Error: ${KVM_DEVICE} not found." >&2
+        echo "Hardware virtualization is required for Kata Containers." >&2
+        echo "Please enable Intel VT-x or AMD-V in your BIOS/UEFI settings, or run without --kata." >&2
+        exit 1
+    fi
+    if [ ! -r "${KVM_DEVICE}" ] || [ ! -w "${KVM_DEVICE}" ]; then
+        echo "❌ Error: Permission denied accessing ${KVM_DEVICE}." >&2
+        echo "Please add your user to the kvm group: sudo usermod -aG kvm \$USER" >&2
+        exit 1
+    fi
+
+    local_kata_target="${KATA_RUNTIME}"
+    if [ "$CONTAINER_RUNTIME" = "docker" ] && [ "${KATA_RUNTIME}" = "kata-runtime" ]; then
+        if command -v containerd-shim-kata-v2 >/dev/null 2>&1 || [ -x "/usr/local/bin/containerd-shim-kata-v2" ] || [ -x "/usr/bin/containerd-shim-kata-v2" ] || [ -x "/opt/kata/bin/containerd-shim-kata-v2" ] || [ -x "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" ]; then
+            if docker info 2>/dev/null | grep -qi "kata-runtime"; then
+                local_kata_target="kata-runtime"
+            else
+                local_kata_target="io.containerd.kata.v2"
+            fi
+        fi
+    fi
+    RUN_FLAGS+=("--runtime=${local_kata_target}")
+fi
+
+# Inject default model and effort from config if not overridden on CLI
+if [ "${#FILTERED_ARGS[@]}" -eq 0 ] || [[ "${FILTERED_ARGS[0]}" != "bash" && "${FILTERED_ARGS[0]}" != "sh" ]]; then
+    if [ -n "$DEFAULT_MODEL" ] && [[ " ${FILTERED_ARGS[*]} " != *" --model "* ]]; then
+        FILTERED_ARGS=("--model" "$DEFAULT_MODEL" "${FILTERED_ARGS[@]}")
+    fi
+    if [ -n "$DEFAULT_EFFORT" ] && [[ " ${FILTERED_ARGS[*]} " != *" --effort "* ]]; then
+        FILTERED_ARGS=("--effort" "$DEFAULT_EFFORT" "${FILTERED_ARGS[@]}")
+    fi
+fi
+
+# Generate session container name based on directory basename and PID (without trailing _)
+dir_slug="$(basename "$TARGET_DIR")"
+dir_slug="${dir_slug//[^a-zA-Z0-9_]/_}"
+SESSION_NAME="agy-${dir_slug}-$$"
 
 echo "🧺 Launching Antigravity via ${CONTAINER_RUNTIME} in isolated basket: $SESSION_NAME"
+if [ "$USE_KATA" = "1" ]; then
+    echo "🛡️  Hypervisor Isolation: Kata Containers microVM active (KVM hardware virtualization)"
+fi
 echo "📂 Workspace: $TARGET_DIR"
 echo "💾 Persisting auth data in volume: $AGY_DATA_VOLUME"
+
+if [ "$AIAB_DRY_RUN" = "1" ]; then
+    echo ""
+    echo "🔍 Dry-run mode active. Container execution command:"
+    echo "$CONTAINER_RUNTIME" run "${RUN_FLAGS[@]}" --rm \
+        --name "$SESSION_NAME" \
+        -e TERM="${TERM:-xterm-256color}" \
+        -v "$TARGET_DIR:${CONTAINER_HOME}/workspace${VOLUME_SUFFIX}" \
+        -v "$AGY_DATA_VOLUME:${CONTAINER_HOME}/.gemini" \
+        -v "$AGY_CONFIG_VOLUME:${CONTAINER_HOME}/.config" \
+        "$AGY_IMAGE" "${FILTERED_ARGS[@]}"
+    exit 0
+fi
 
 exec "$CONTAINER_RUNTIME" run "${RUN_FLAGS[@]}" --rm \
     --name "$SESSION_NAME" \
     -e TERM="${TERM:-xterm-256color}" \
-    -v "$TARGET_DIR:/home/minty/workspace${VOLUME_SUFFIX}" \
-    -v "$AGY_DATA_VOLUME:/home/minty/.gemini" \
-    -v "$AGY_CONFIG_VOLUME:/home/minty/.config" \
-    "$AGY_IMAGE" "$@"
+    -v "$TARGET_DIR:${CONTAINER_HOME}/workspace${VOLUME_SUFFIX}" \
+    -v "$AGY_DATA_VOLUME:${CONTAINER_HOME}/.gemini" \
+    -v "$AGY_CONFIG_VOLUME:${CONTAINER_HOME}/.config" \
+    "$AGY_IMAGE" "${FILTERED_ARGS[@]}"

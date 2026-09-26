@@ -1,6 +1,17 @@
 .git
 .gitignore
 .dockerignore
+.github/
 *.log
+*.md
+*.jpeg
+*.jpg
+*.png
 scratch/
 .gemini/
+# Exclude tests, shell wrappers, host scripts, and launcher (build only requires entrypoint.sh)
+tests/
+shell/
+scripts/
+bin/
+docs/
