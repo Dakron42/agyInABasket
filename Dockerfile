@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 FROM ubuntu:24.04
 
+# Image metadata label for scoped cleanup and identification
+LABEL org.aiab.managed="true"
+
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 

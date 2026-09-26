@@ -26,7 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optimized config parser to use native bash parameter expansion and safely ignore malformed lines lacking `=`.
 - Updated `entrypoint.sh` and `scripts/install.sh` to strict mode (`set -euo pipefail`).
 - Scoped `cmd_backup_auth` volume mount to destination directory rather than entire `$HOME`.
-- Upgraded `cmd_status` to query `agy --version` directly before falling back to changelog.
+- Scoped `cmd_clean` image pruning to `org.aiab.managed=true` to prevent pruning unrelated host images.
+- Consolidated `cmd_status` version check into a single container execution.
 - Replaced `xargs -r` GNU extension in `cmd_clean` with portable shell check.
 - Added connection timeouts (`--connect-timeout 5 --max-time 10`) to candidate asset downloads in `scripts/install-kata.sh`.
 - Replaced legacy `busybox` references across scripts with the primary container image (`agy-yolo:latest`).

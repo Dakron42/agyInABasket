@@ -79,7 +79,7 @@ if "$CONTAINER_RUNTIME" volume inspect agy-auth-data >/dev/null 2>&1; then
     "$CONTAINER_RUNTIME" run --rm \
         -v "agy-auth-data:/from:ro" \
         -v "agy-data:/to" \
-        agy-yolo:latest sh -c "cp -an /from/* /to/ 2>/dev/null || true" || true
+        agy-yolo:latest sh -c "cp -an /from/. /to/ 2>/dev/null || true" || true
 fi
 
 # 4. Install host CLI wrapper into ~/.local/bin

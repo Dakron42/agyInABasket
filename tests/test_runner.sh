@@ -268,7 +268,7 @@ if [ "${1:-}" = "ps" ]; then
     exit 0
 fi
 if [ "${1:-}" = "image" ] && [ "${2:-}" = "prune" ]; then
-    echo "MOCK_PRUNED"
+    echo "MOCK_PRUNED: $@"
     exit 0
 fi
 exit 0
@@ -276,6 +276,7 @@ EOF
 
 clean_output=$(PATH="${MOCK_BIN}:${PATH}" CONTAINER_RUNTIME=docker "${AIAB_BIN}" clean 2>&1)
 assert_contains "$clean_output" "Cleanup finished!" "aiab clean executes cleanup flow"
+assert_contains "$clean_output" "label=org.aiab.managed=true" "aiab clean scopes image pruning to org.aiab.managed=true label"
 
 # ------------------------------------------------------------
 # Group 10: Kata Containers & Hypervisor Integration

@@ -359,10 +359,9 @@ cmd_status() {
     fi
     echo ""
     echo "--- agy CLI Version (inside container) ---"
-    "$CONTAINER_RUNTIME" run --rm "${AGY_IMAGE}" agy --version 2>/dev/null || \
-        "$CONTAINER_RUNTIME" run --rm "${AGY_IMAGE}" agy version 2>/dev/null || \
-        "$CONTAINER_RUNTIME" run --rm "${AGY_IMAGE}" agy changelog 2>/dev/null | head -n 3 || \
-        echo "Version check unavailable."
+    "$CONTAINER_RUNTIME" run --rm "${AGY_IMAGE}" bash -c \
+        "agy --version 2>/dev/null || agy version 2>/dev/null || agy changelog 2>/dev/null | head -n 3" \
+        || echo "Version check unavailable."
 }
 
 # Subcommand: check-kata
@@ -748,13 +747,13 @@ cmd_config() {
 # Subcommand: clean
 cmd_clean() {
     check_runtime
-    echo "🧹 Pruning stopped containers and dangling images via ${CONTAINER_RUNTIME}..."
+    echo "🧹 Pruning stopped agy containers and dangling aiab images via ${CONTAINER_RUNTIME}..."
     local stopped_containers
     stopped_containers="$("$CONTAINER_RUNTIME" ps -a --filter "name=agy-" --filter "status=exited" -q 2>/dev/null || true)"
     if [ -n "$stopped_containers" ]; then
         echo "$stopped_containers" | xargs "$CONTAINER_RUNTIME" rm 2>/dev/null || true
     fi
-    "$CONTAINER_RUNTIME" image prune -f
+    "$CONTAINER_RUNTIME" image prune -f --filter "label=org.aiab.managed=true"
     echo "✓ Cleanup finished!"
 }
 
