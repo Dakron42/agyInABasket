@@ -22,6 +22,7 @@ ENV_KVM_DEVICE="${KVM_DEVICE:-}"
 ENV_DEFAULT_MODEL="${DEFAULT_MODEL:-}"
 ENV_DEFAULT_EFFORT="${DEFAULT_EFFORT:-}"
 ENV_AIAB_DRY_RUN="${AIAB_DRY_RUN:-}"
+ENV_AIAB_LOCAL_SESSION="${AIAB_LOCAL_SESSION:-}"
 
 # Configuration file location (XDG compliant, overridable via AIAB_CONFIG_FILE)
 AIAB_CONFIG_FILE="${AIAB_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/aiab/config}"
@@ -960,6 +961,7 @@ fi
 
 CLI_KATA_OVERRIDE=""
 AIAB_DRY_RUN="${ENV_AIAB_DRY_RUN:-0}"
+AIAB_LOCAL_SESSION="${ENV_AIAB_LOCAL_SESSION:-1}"
 
 # Parse arguments: extract target directory, flags, and forwarded options
 RAW_ARGS=("$@")
@@ -974,6 +976,9 @@ for arg in "${RAW_ARGS[@]}"; do
             ;;
         --no-kata|--no-hypervisor)
             CLI_KATA_OVERRIDE="0"
+            ;;
+        --no-local-session)
+            AIAB_LOCAL_SESSION="0"
             ;;
         --dry-run)
             AIAB_DRY_RUN="1"
@@ -1122,6 +1127,27 @@ fi
 echo "📂 Workspace: $TARGET_DIR"
 echo "💾 Persisting auth data in volume: $AGY_DATA_VOLUME"
 
+EXTRA_VOLUMES=()
+if [ "$AIAB_LOCAL_SESSION" = "1" ]; then
+    LOCAL_SESSION_DIR="${TARGET_DIR}/.aiab/brain"
+    echo "🧠 Persisting session & memory in: $LOCAL_SESSION_DIR"
+    EXTRA_VOLUMES+=(-v "${LOCAL_SESSION_DIR}:${CONTAINER_HOME}/.gemini/antigravity-cli/brain${VOLUME_SUFFIX}")
+    if [ "$AIAB_DRY_RUN" != "1" ]; then
+        mkdir -p "$LOCAL_SESSION_DIR"
+        for ignore_file in "${TARGET_DIR}/.gitignore" "${TARGET_DIR}/.dockerignore"; do
+            if [ "$ignore_file" = "${TARGET_DIR}/.gitignore" ] || [ -f "$ignore_file" ]; then
+                if [ ! -f "$ignore_file" ] || ! grep -qxE '\.?aiab/?' "$ignore_file" 2>/dev/null; then
+                    if [ -f "$ignore_file" ] && [ -s "$ignore_file" ] && [ "$(tail -c1 "$ignore_file" | wc -l)" -eq 0 ]; then
+                        printf '\n.aiab/\n' >> "$ignore_file"
+                    else
+                        printf '.aiab/\n' >> "$ignore_file"
+                    fi
+                fi
+            fi
+        done
+    fi
+fi
+
 if [ "$AIAB_DRY_RUN" = "1" ]; then
     echo ""
     echo "🔍 Dry-run mode active. Container execution command:"
@@ -1131,6 +1157,7 @@ if [ "$AIAB_DRY_RUN" = "1" ]; then
         -v "$TARGET_DIR:${CONTAINER_HOME}/workspace${VOLUME_SUFFIX}" \
         -v "$AGY_DATA_VOLUME:${CONTAINER_HOME}/.gemini" \
         -v "$AGY_CONFIG_VOLUME:${CONTAINER_HOME}/.config" \
+        "${EXTRA_VOLUMES[@]}" \
         "$AGY_IMAGE" "${FILTERED_ARGS[@]}"
     exit 0
 fi
@@ -1141,4 +1168,5 @@ exec "$CONTAINER_RUNTIME" run "${RUN_FLAGS[@]}" --rm \
     -v "$TARGET_DIR:${CONTAINER_HOME}/workspace${VOLUME_SUFFIX}" \
     -v "$AGY_DATA_VOLUME:${CONTAINER_HOME}/.gemini" \
     -v "$AGY_CONFIG_VOLUME:${CONTAINER_HOME}/.config" \
+    "${EXTRA_VOLUMES[@]}" \
     "$AGY_IMAGE" "${FILTERED_ARGS[@]}"
